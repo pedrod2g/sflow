@@ -47,6 +47,19 @@ def _default_settings() -> dict:
         "history_hotkey_enabled": True,
         "sound_on_start": False,
         "sound_on_done": False,
+        "snippets_enabled": True,
+        "focus_mode_enabled": False,
+        "focus_mode_apps": [],
+        "transform_prompts": [
+            {"label": "Más conciso", "prompt": "Haz este texto más conciso preservando el significado clave."},
+            {"label": "Más formal", "prompt": "Reescribe este texto en tono formal profesional."},
+            {"label": "Más casual", "prompt": "Reescribe este texto en tono casual amigable."},
+            {"label": "Traducir a inglés", "prompt": "Traduce este texto a inglés natural."},
+            {"label": "Bullet points", "prompt": "Convierte este texto en una lista de bullet points concisos."},
+            {"label": "Corregir ortografía", "prompt": "Corrige solo errores ortográficos y de puntuación, preserva exactamente el resto."},
+            {"label": "Expandir idea", "prompt": "Expande esta idea en un párrafo completo y bien estructurado."},
+            {"label": "Resumir", "prompt": "Resume este texto en 1-2 oraciones."},
+        ],
     }
 
 
@@ -123,5 +136,7 @@ DOUBLE_TAP_INTERVAL = 0.4
 # --- Database (writable user data) ---
 DB_PATH = os.path.join(_DATA_DIR, "transcriptions.db")
 DICTIONARY_PATH = os.path.join(_DATA_DIR, "dictionary.txt")
+AUDIO_DIR = os.path.join(_DATA_DIR, "audio")
+os.makedirs(AUDIO_DIR, exist_ok=True)
 
 APP_DATA_DIR = _DATA_DIR

@@ -23,9 +23,10 @@ from core.hotkey import HotkeyListener
 from core.paste import paste_text, paste_last_transcript, save_frontmost_app
 from core.command_mode import CommandModeHandler, copy_selection
 from core.dictation_actions import extract_actions, perform_actions
+from core.transform import TransformHandler
 from db.database import TranscriptionDB
 from web.server import start_web_server
-from config import LOGO_PATH, APP_DATA_DIR
+from config import LOGO_PATH, APP_DATA_DIR, AUDIO_DIR, get_setting
 
 
 def _ensure_accessibility() -> bool:
@@ -179,6 +180,7 @@ class SFlowApp(QObject):
         self.transcriber = Transcriber()
         self.groq_raw = GroqTranscriber()  # raw STT for command mode (no LLM cleanup)
         self.command = CommandModeHandler()
+        self.transform = TransformHandler()
         self.db = TranscriptionDB()
         self.hotkey = HotkeyListener()
         self.pill = PillWidget()
@@ -196,6 +198,7 @@ class SFlowApp(QObject):
         self.hotkey.command_released.connect(self._on_command_released, Qt.ConnectionType.QueuedConnection)
         self.hotkey.hub_requested.connect(self._on_hub_requested, Qt.ConnectionType.QueuedConnection)
         self.hotkey.paste_last_requested.connect(self._on_paste_last, Qt.ConnectionType.QueuedConnection)
+        self.hotkey.transform_triggered.connect(self._on_transform, Qt.ConnectionType.QueuedConnection)
 
         self.transcription_done.connect(self._on_transcription_done, Qt.ConnectionType.QueuedConnection)
         self.transcription_error.connect(self._on_transcription_error, Qt.ConnectionType.QueuedConnection)
@@ -225,16 +228,30 @@ class SFlowApp(QObject):
 
         wav_buffer = self.recorder.get_wav_buffer()
         recording_duration = self.recorder.get_duration()
+
+        # Persist WAV so the user can re-transcribe from the Hub later
+        audio_path = None
+        if get_setting("save_audio_for_retry", True):
+            import uuid
+            audio_path = os.path.join(AUDIO_DIR, f"{uuid.uuid4().hex}.wav")
+            try:
+                self.recorder.save_wav_to(audio_path)
+            except Exception as e:
+                print(f"audio save failed: {e}")
+                audio_path = None
+
         threading.Thread(
             target=self._transcribe_worker,
-            args=(wav_buffer, recording_duration),
+            args=(wav_buffer, recording_duration, audio_path),
             daemon=True,
         ).start()
 
-    def _transcribe_worker(self, wav_buffer, duration):
+    def _transcribe_worker(self, wav_buffer, duration, audio_path=None):
         try:
             text, model_id = self.transcriber.transcribe(wav_buffer)
             if text:
+                # Stash audio_path so _on_transcription_done can persist it with the row
+                self._pending_audio_path = audio_path
                 self.transcription_done.emit(text, duration, model_id)
             else:
                 self.transcription_error.emit("No speech detected")
@@ -247,11 +264,15 @@ class SFlowApp(QObject):
         final_text, actions = extract_actions(text)
         paste_text(final_text)
         if actions:
-            # Small delay so text lands before Enter
             from PyQt6.QtCore import QTimer
             QTimer.singleShot(60, lambda: perform_actions(actions))
         self._last_text = final_text
-        self.db.insert(text=final_text, duration_seconds=duration, model=model_id)
+        audio_path = getattr(self, "_pending_audio_path", None)
+        self._pending_audio_path = None
+        self.db.insert(
+            text=final_text, duration_seconds=duration,
+            model=model_id, audio_path=audio_path,
+        )
         self.pill.set_state(PillWidget.STATE_DONE)
 
     @pyqtSlot()
@@ -277,6 +298,24 @@ class SFlowApp(QObject):
                 text = rows[0].get("text") or ""
         if text:
             paste_last_transcript(text)
+
+    @pyqtSlot(int)
+    def _on_transform(self, index: int):
+        """Option+N — transform selected text via Llama with the Nth custom prompt."""
+        save_frontmost_app()
+        selection = copy_selection()
+        if not selection:
+            self.pill.set_state(PillWidget.STATE_ERROR)
+            return
+        self.pill.set_state(PillWidget.STATE_PROCESSING)
+
+        def worker():
+            try:
+                result = self.transform.run(index, selection)
+                self.command_done.emit(result)
+            except Exception as e:
+                self.command_error.emit(str(e))
+        threading.Thread(target=worker, daemon=True).start()
 
     @pyqtSlot(str)
     def _on_transcription_error(self, error: str):

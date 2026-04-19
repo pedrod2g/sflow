@@ -8,12 +8,13 @@ from datetime import datetime, timezone
 from PyQt6.QtWidgets import (
     QWidget, QVBoxLayout, QHBoxLayout, QLabel, QLineEdit, QPushButton,
     QScrollArea, QFrame, QStackedWidget, QListWidget, QListWidgetItem,
-    QMenu, QPlainTextEdit, QGroupBox, QCheckBox, QComboBox,
+    QMenu, QPlainTextEdit, QGroupBox, QCheckBox, QComboBox, QDialog,
     QApplication, QMessageBox, QSizePolicy, QFileDialog,
 )
 from PyQt6.QtCore import Qt, QTimer, QSize, pyqtSignal
 from PyQt6.QtGui import QIcon, QAction, QPixmap, QFont, QPainter, QColor, QPen
 from db.database import TranscriptionDB
+from db.snippets import SnippetsDB
 from core.paste import paste_last_transcript
 from config import (
     LOGO_PATH, DICTIONARY_PATH, get_setting, set_setting,
@@ -62,6 +63,97 @@ def time_ago(iso_ts: str) -> str:
         return iso_ts or ""
 
 
+class EditTranscriptDialog(QDialog):
+    """Edit a past transcription. After save, suggest new words (capitalized /
+    hyphenated) to add to dictionary.txt for future Whisper boosting."""
+    saved = pyqtSignal(int)  # row id
+
+    def __init__(self, row_id: int, original_text: str):
+        super().__init__()
+        self.row_id = row_id
+        self.original = original_text
+        self.setWindowTitle("Editar transcripción")
+        self.resize(580, 340)
+        self.setStyleSheet(f"background: {C.BG}; color: {C.TEXT};")
+
+        root = QVBoxLayout(self)
+        root.setContentsMargins(18, 16, 18, 16)
+        root.setSpacing(10)
+
+        lbl = QLabel("Corrige el texto. SFlow sugiere automáticamente palabras nuevas (nombres, jerga) para el diccionario.")
+        lbl.setWordWrap(True)
+        lbl.setStyleSheet(f"color: {C.TEXT_DIM}; font-size: 12px;")
+        root.addWidget(lbl)
+
+        self.editor = QPlainTextEdit()
+        self.editor.setPlainText(original_text)
+        self.editor.setStyleSheet(f"""
+            QPlainTextEdit {{
+                background: {C.BG_INPUT}; color: {C.TEXT};
+                border: 1px solid {C.DIVIDER}; border-radius: 6px;
+                padding: 10px; font-size: 13px;
+            }}
+            QPlainTextEdit:focus {{ border-color: {C.ACCENT}; }}
+        """)
+        root.addWidget(self.editor, 1)
+
+        row = QHBoxLayout()
+        row.addStretch()
+        cancel = QPushButton("Cancelar")
+        cancel.setCursor(Qt.CursorShape.PointingHandCursor)
+        cancel.setStyleSheet(f"""
+            QPushButton {{
+                background: {C.BG_INPUT}; color: {C.TEXT};
+                border: 1px solid {C.DIVIDER}; border-radius: 6px;
+                padding: 8px 18px; font-size: 12px;
+            }}
+            QPushButton:hover {{ background: {C.BG_HOVER}; }}
+        """)
+        cancel.clicked.connect(self.reject)
+        row.addWidget(cancel)
+
+        save = QPushButton("Guardar")
+        save.setDefault(True)
+        save.setCursor(Qt.CursorShape.PointingHandCursor)
+        save.setStyleSheet(f"""
+            QPushButton {{
+                background: {C.ACCENT}; color: white;
+                border: none; border-radius: 6px;
+                padding: 8px 18px; font-weight: 500; font-size: 12px;
+            }}
+            QPushButton:hover {{ background: #4a8fef; }}
+        """)
+        save.clicked.connect(self._save)
+        row.addWidget(save)
+        root.addLayout(row)
+
+    def _save(self):
+        new_text = self.editor.toPlainText().strip()
+        if not new_text or new_text == self.original:
+            self.accept()
+            return
+
+        from core.dictionary_learner import diff_candidates, add_to_dictionary
+        from db.database import TranscriptionDB
+
+        TranscriptionDB().update_text(self.row_id, new_text)
+
+        candidates = diff_candidates(self.original, new_text)
+        if candidates:
+            msg = QMessageBox(self)
+            msg.setWindowTitle("Palabras detectadas")
+            msg.setText("Detectamos estas palabras nuevas en tu corrección:\n\n"
+                        + "\n".join(f"  • {c}" for c in candidates[:10])
+                        + "\n\n¿Agregarlas al diccionario personal? (mejora reconocimiento futuro)")
+            msg.setStandardButtons(QMessageBox.StandardButton.Yes | QMessageBox.StandardButton.No)
+            msg.setDefaultButton(QMessageBox.StandardButton.Yes)
+            if msg.exec() == QMessageBox.StandardButton.Yes:
+                add_to_dictionary(candidates)
+
+        self.saved.emit(self.row_id)
+        self.accept()
+
+
 class SidebarButton(QPushButton):
     def __init__(self, icon_text: str, label: str):
         super().__init__(f"{icon_text}   {label}")
@@ -95,6 +187,7 @@ class TranscriptionCard(QFrame):
     delete_requested = pyqtSignal(int)
     copy_requested = pyqtSignal(str)
     repaste_requested = pyqtSignal(str)
+    retry_requested = pyqtSignal(int)
 
     def __init__(self, row: dict):
         super().__init__()
@@ -104,6 +197,7 @@ class TranscriptionCard(QFrame):
         self._model = row.get("model", "") or ""
         self._duration = row.get("duration_seconds") or 0.0
         self._created = row.get("created_at", "") or ""
+        self._audio_path = row.get("audio_path") or ""
         self._expanded = False
 
         self.setStyleSheet(f"""
@@ -196,11 +290,26 @@ class TranscriptionCard(QFrame):
         a_repaste.triggered.connect(lambda: self.repaste_requested.emit(self._text))
         m.addAction(a_repaste)
 
+        a_edit = QAction("Editar y aprender al diccionario", m)
+        a_edit.triggered.connect(self._open_edit)
+        m.addAction(a_edit)
+
+        import os
+        if self._audio_path and os.path.exists(self._audio_path):
+            a_retry = QAction("Re-transcribir audio", m)
+            a_retry.triggered.connect(lambda: self.retry_requested.emit(self._id))
+            m.addAction(a_retry)
+
         m.addSeparator()
         a_del = QAction("Eliminar", m)
         a_del.triggered.connect(lambda: self.delete_requested.emit(self._id))
         m.addAction(a_del)
         m.exec(self.mapToGlobal(self.rect().topRight()))
+
+    def _open_edit(self):
+        dlg = EditTranscriptDialog(self._id, self._text)
+        dlg.saved.connect(self.retry_requested.emit)  # piggyback reload
+        dlg.exec()
 
 
 class HistoryPage(QWidget):
@@ -310,6 +419,7 @@ class HistoryPage(QWidget):
             card.copy_requested.connect(self._copy_to_clipboard)
             card.repaste_requested.connect(self._repaste)
             card.delete_requested.connect(self._delete)
+            card.retry_requested.connect(self._retry)
             self._list_layout.insertWidget(self._list_layout.count() - 1, card)
 
     def _copy_to_clipboard(self, text: str):
@@ -322,11 +432,49 @@ class HistoryPage(QWidget):
         QTimer.singleShot(180, lambda: paste_last_transcript(text))
 
     def _delete(self, row_id: int):
-        import sqlite3
+        import sqlite3, os
         from config import DB_PATH
         with sqlite3.connect(DB_PATH) as conn:
+            r = conn.execute("SELECT audio_path FROM transcriptions WHERE id = ?", (row_id,)).fetchone()
             conn.execute("DELETE FROM transcriptions WHERE id = ?", (row_id,))
+        if r and r[0] and os.path.exists(r[0]):
+            try:
+                os.unlink(r[0])
+            except OSError:
+                pass
         self.reload()
+
+    def _retry(self, row_id: int):
+        """Re-transcribe a past recording using the current backend/settings."""
+        import os, io, threading
+        from PyQt6.QtCore import QMetaObject, Qt as _Qt
+        row = self.db.get(row_id)
+        if not row or not row.get("audio_path") or not os.path.exists(row["audio_path"]):
+            QMessageBox.warning(self, "Sin audio", "Este dictado no tiene WAV asociado.")
+            return
+
+        from core.transcriber import Transcriber
+        transcriber = Transcriber()
+        path = row["audio_path"]
+
+        # Show feedback toast-style label at top of list
+        busy = QLabel("Re-transcribiendo…")
+        busy.setStyleSheet(f"color: {C.ACCENT}; padding: 8px; font-size: 12px;")
+        self._list_layout.insertWidget(0, busy)
+
+        def worker():
+            try:
+                with open(path, "rb") as f:
+                    buf = io.BytesIO(f.read())
+                new_text, model_id = transcriber.transcribe(buf)
+                if new_text:
+                    self.db.update_text(row_id, new_text)
+            except Exception as e:
+                print(f"retry failed: {e}")
+            # Reload on main thread
+            QTimer.singleShot(0, lambda: (busy.deleteLater() if busy else None, self.reload()))
+
+        threading.Thread(target=worker, daemon=True).start()
 
 
 class DictionaryPage(QWidget):
@@ -398,6 +546,186 @@ class DictionaryPage(QWidget):
                 f.write(self.editor.toPlainText())
         except Exception as e:
             QMessageBox.warning(self, "Error", f"No se pudo guardar: {e}")
+
+
+class SnippetsPage(QWidget):
+    def __init__(self):
+        super().__init__()
+        self.db = SnippetsDB()
+        root = QVBoxLayout()
+        root.setContentsMargins(28, 22, 28, 22)
+        root.setSpacing(14)
+
+        title = QLabel("Snippets")
+        title.setStyleSheet(f"color: {C.TEXT}; font-size: 22px; font-weight: 600;")
+        root.addWidget(title)
+
+        sub = QLabel(
+            'Atajos de voz. Cuando dictes el trigger, SFlow lo reemplaza por la expansión. '
+            'Ejemplo: di "mi correo" y se pega tu email.'
+        )
+        sub.setStyleSheet(f"color: {C.TEXT_DIM}; font-size: 12px;")
+        sub.setWordWrap(True)
+        root.addWidget(sub)
+
+        # New snippet form
+        form = QFrame()
+        form.setStyleSheet(f"background: {C.BG_CARD}; border: 1px solid {C.DIVIDER}; border-radius: 10px;")
+        fl = QVBoxLayout(form)
+        fl.setContentsMargins(14, 12, 14, 12)
+        fl.setSpacing(8)
+
+        lbl = QLabel("Agregar snippet")
+        lbl.setStyleSheet(f"color: {C.TEXT_DIM}; font-size: 11px; font-weight: 500;")
+        fl.addWidget(lbl)
+
+        self.trigger_input = QLineEdit()
+        self.trigger_input.setPlaceholderText("trigger (ej: mi correo)")
+        self.trigger_input.setStyleSheet(self._input_style())
+        fl.addWidget(self.trigger_input)
+
+        self.expansion_input = QPlainTextEdit()
+        self.expansion_input.setPlaceholderText("expansión (lo que se pega cuando digas el trigger)")
+        self.expansion_input.setMaximumHeight(80)
+        self.expansion_input.setStyleSheet(f"""
+            QPlainTextEdit {{
+                background: {C.BG_INPUT}; color: {C.TEXT};
+                border: 1px solid {C.DIVIDER}; border-radius: 6px;
+                padding: 8px; font-size: 13px;
+            }}
+            QPlainTextEdit:focus {{ border-color: {C.ACCENT}; }}
+        """)
+        fl.addWidget(self.expansion_input)
+
+        row = QHBoxLayout()
+        row.addStretch()
+        add_btn = QPushButton("Agregar")
+        add_btn.setCursor(Qt.CursorShape.PointingHandCursor)
+        add_btn.setStyleSheet(self._btn_style())
+        add_btn.clicked.connect(self._add)
+        row.addWidget(add_btn)
+        fl.addLayout(row)
+        root.addWidget(form)
+
+        # List of existing snippets
+        self._list_container = QWidget()
+        self._list_layout = QVBoxLayout(self._list_container)
+        self._list_layout.setSpacing(6)
+        self._list_layout.setContentsMargins(0, 0, 0, 0)
+        self._list_layout.addStretch()
+
+        scroll = QScrollArea()
+        scroll.setWidget(self._list_container)
+        scroll.setWidgetResizable(True)
+        scroll.setFrameShape(QFrame.Shape.NoFrame)
+        scroll.setStyleSheet(f"QScrollArea {{ background: transparent; border: none; }}")
+        root.addWidget(scroll, 1)
+
+        self.setLayout(root)
+        self.reload()
+
+    def _input_style(self):
+        return f"""
+            QLineEdit {{
+                background: {C.BG_INPUT}; color: {C.TEXT};
+                border: 1px solid {C.DIVIDER}; border-radius: 6px;
+                padding: 8px 10px; font-size: 13px;
+            }}
+            QLineEdit:focus {{ border-color: {C.ACCENT}; }}
+        """
+
+    def _btn_style(self):
+        return f"""
+            QPushButton {{
+                background: {C.ACCENT}; color: white;
+                border: none; border-radius: 6px;
+                padding: 7px 18px; font-weight: 500; font-size: 12px;
+            }}
+            QPushButton:hover {{ background: #4a8fef; }}
+        """
+
+    def _add(self):
+        t = self.trigger_input.text().strip()
+        e = self.expansion_input.toPlainText().strip()
+        if not t or not e:
+            QMessageBox.warning(self, "Campos vacíos", "Trigger y expansión son requeridos.")
+            return
+        try:
+            self.db.add(t, e)
+            self.trigger_input.clear()
+            self.expansion_input.clear()
+            self.reload()
+        except Exception as err:
+            QMessageBox.warning(self, "Error", str(err))
+
+    def reload(self):
+        while self._list_layout.count() > 1:
+            w = self._list_layout.itemAt(0).widget()
+            if w is None:
+                break
+            self._list_layout.removeWidget(w)
+            w.deleteLater()
+
+        rows = self.db.list_all()
+        if not rows:
+            empty = QLabel("No tienes snippets. Agrega uno arriba.")
+            empty.setStyleSheet(f"color: {C.TEXT_FAINT}; padding: 20px; text-align: center;")
+            self._list_layout.insertWidget(0, empty)
+            return
+
+        for s in rows:
+            card = self._snippet_card(s)
+            self._list_layout.insertWidget(self._list_layout.count() - 1, card)
+
+    def _snippet_card(self, s: dict) -> QFrame:
+        f = QFrame()
+        f.setStyleSheet(f"""
+            QFrame {{
+                background: {C.BG_CARD}; border: 1px solid {C.DIVIDER};
+                border-radius: 8px;
+            }}
+        """)
+        lay = QVBoxLayout(f)
+        lay.setContentsMargins(14, 10, 14, 10)
+        lay.setSpacing(4)
+
+        head = QHBoxLayout()
+        trig = QLabel(f'"{s["trigger"]}"')
+        trig.setStyleSheet(f"color: {C.ACCENT}; font-size: 13px; font-weight: 600;")
+        head.addWidget(trig)
+
+        if s.get("usage_count", 0) > 0:
+            usage = QLabel(f"· usado {s['usage_count']}×")
+            usage.setStyleSheet(f"color: {C.TEXT_FAINT}; font-size: 11px;")
+            head.addWidget(usage)
+
+        head.addStretch()
+        del_btn = QPushButton("✕")
+        del_btn.setFixedSize(22, 22)
+        del_btn.setCursor(Qt.CursorShape.PointingHandCursor)
+        del_btn.setStyleSheet(f"""
+            QPushButton {{
+                background: transparent; color: {C.TEXT_FAINT};
+                border: none; border-radius: 4px; font-size: 13px;
+            }}
+            QPushButton:hover {{ background: {C.BG_HOVER}; color: {C.ERR}; }}
+        """)
+        sid = s["id"]
+        del_btn.clicked.connect(lambda: self._delete(sid))
+        head.addWidget(del_btn)
+        lay.addLayout(head)
+
+        # Show expansion (multi-line safe)
+        exp = QLabel(s["expansion"])
+        exp.setWordWrap(True)
+        exp.setStyleSheet(f"color: {C.TEXT}; font-size: 12px; line-height: 1.4;")
+        lay.addWidget(exp)
+
+        return f
+
+    def _delete(self, sid: int):
+        self.db.delete(sid)
+        self.reload()
 
 
 class SettingsPage(QWidget):
@@ -692,8 +1020,9 @@ class HubWindow(QWidget):
         self.btn_home = SidebarButton("🏠", "Home")
         self.btn_hist = SidebarButton("🕐", "Historial")
         self.btn_dict = SidebarButton("📖", "Diccionario")
+        self.btn_snip = SidebarButton("✨", "Snippets")
         self.btn_set = SidebarButton("⚙️", "Ajustes")
-        for b in (self.btn_home, self.btn_hist, self.btn_dict, self.btn_set):
+        for b in (self.btn_home, self.btn_hist, self.btn_dict, self.btn_snip, self.btn_set):
             sl.addWidget(b)
         sl.addStretch()
         self.btn_home.setChecked(True)
@@ -704,17 +1033,20 @@ class HubWindow(QWidget):
         self.home_page = HomePage(db)
         self.history_page = HistoryPage(db)
         self.dict_page = DictionaryPage()
+        self.snippets_page = SnippetsPage()
         self.settings_page = SettingsPage()
         self.pages.addWidget(self.home_page)
         self.pages.addWidget(self.history_page)
         self.pages.addWidget(self.dict_page)
+        self.pages.addWidget(self.snippets_page)
         self.pages.addWidget(self.settings_page)
         root.addWidget(self.pages, 1)
 
         self.btn_home.clicked.connect(lambda: self._go(0))
         self.btn_hist.clicked.connect(lambda: self._go(1))
         self.btn_dict.clicked.connect(lambda: self._go(2))
-        self.btn_set.clicked.connect(lambda: self._go(3))
+        self.btn_snip.clicked.connect(lambda: self._go(3))
+        self.btn_set.clicked.connect(lambda: self._go(4))
 
     def _go(self, idx: int):
         self.pages.setCurrentIndex(idx)
@@ -722,6 +1054,8 @@ class HubWindow(QWidget):
             self.home_page.reload()
         elif idx == 1:
             self.history_page.reload()
+        elif idx == 3:
+            self.snippets_page.reload()
 
     def showEvent(self, event):
         super().showEvent(event)

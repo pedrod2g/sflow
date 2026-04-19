@@ -12,6 +12,7 @@ from core.llm_cleanup import LLMCleanup
 from core.smart_commands import apply as apply_smart_commands
 from core.dictionary import as_whisper_prompt
 from core.context import tone_for_active_app
+from core.snippets_matcher import apply as apply_snippets
 
 
 class Transcriber:
@@ -52,5 +53,12 @@ class Transcriber:
                 except Exception:
                     tone = "default"
             raw = self._cleanup.clean(raw, tone=tone)
+
+        # Snippets — run LAST so expansions are inserted verbatim, not cleaned
+        if get_setting("snippets_enabled", True):
+            try:
+                raw = apply_snippets(raw)
+            except Exception:
+                pass
 
         return raw.strip(), backend.model_id

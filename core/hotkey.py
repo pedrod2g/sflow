@@ -10,10 +10,27 @@ Emits:
   - pressed / released          → regular transcription
   - command_pressed / command_released → command-mode flow
 """
+import os
+import sys
 import time
+import datetime
 from pynput import keyboard, mouse
 from PyQt6.QtCore import QObject, pyqtSignal
-from config import DOUBLE_TAP_INTERVAL, get_setting
+from config import DOUBLE_TAP_INTERVAL, get_setting, APP_DATA_DIR
+
+
+# Debug log file — always writes (tiny footprint) so we can diagnose hotkey
+# issues from a packaged .app without stdout visibility.
+_LOG_PATH = os.path.join(APP_DATA_DIR, "hotkey.log")
+
+
+def _log(msg: str):
+    try:
+        ts = datetime.datetime.now().isoformat(timespec="seconds")
+        with open(_LOG_PATH, "a") as f:
+            f.write(f"[{ts}] {msg}\n")
+    except Exception:
+        pass
 
 
 _MOUSE_BUTTON_MAP = {
@@ -30,6 +47,7 @@ class HotkeyListener(QObject):
     command_released = pyqtSignal()
     hub_requested = pyqtSignal()
     paste_last_requested = pyqtSignal()
+    transform_triggered = pyqtSignal(int)  # index 0..7 (Option+1..8)
 
     def __init__(self):
         super().__init__()
@@ -47,12 +65,14 @@ class HotkeyListener(QObject):
         self._ctrl_tap_count = 0
 
     def start(self):
+        _log("HotkeyListener.start() called")
         self._kb_listener = keyboard.Listener(
             on_press=self._on_press,
             on_release=self._on_release,
         )
         self._kb_listener.daemon = True
         self._kb_listener.start()
+        _log(f"keyboard.Listener started. running={self._kb_listener.running}")
 
         mb_name = get_setting("mouse_button_hotkey")
         if mb_name and _MOUSE_BUTTON_MAP.get(mb_name):
@@ -130,7 +150,7 @@ class HotkeyListener(QObject):
         elif is_shift:
             self._shift_held = True
 
-        # Global utility hotkeys (work even during recording? no — only when idle)
+        # Global utility hotkeys (only when idle — not during recording)
         if not self._recording:
             ch = self._key_char(key)
             # Cmd+Shift+H → open Hub
@@ -144,6 +164,24 @@ class HotkeyListener(QObject):
                     and not self._alt_held and ch == "v"):
                 self.paste_last_requested.emit()
                 return
+            # Option+1..8 → fire transform N (Wispr Flow convention)
+            # Note: on macOS, Option+digit produces special characters:
+            #   Option+1 = ¡, Option+2 = ™, Option+3 = £, Option+4 = ¢, Option+5 = ∞,
+            #   Option+6 = §, Option+7 = ¶, Option+8 = •
+            # We match on these SYMBOLS because that's what pynput reports after
+            # macOS applies the dead-key layer. Doc this clearly for users.
+            if self._alt_held and not self._ctrl_held and not self._cmd_held and not self._shift_held:
+                _OPT_DIGIT_MAP = {"¡": 0, "™": 1, "£": 2, "¢": 3, "∞": 4, "§": 5, "¶": 6, "•": 7}
+                # Also support plain digits in case layout differs
+                if ch in _OPT_DIGIT_MAP:
+                    idx = _OPT_DIGIT_MAP[ch]
+                elif ch in "12345678":
+                    idx = int(ch) - 1
+                else:
+                    idx = None
+                if idx is not None:
+                    self.transform_triggered.emit(idx)
+                    return
 
         if self._recording:
             return
@@ -162,6 +200,7 @@ class HotkeyListener(QObject):
             self._recording = True
             self._hands_free = False
             self._command_mode = False
+            _log("emit pressed (Ctrl+Alt hold)")
             self.pressed.emit()
 
     def _on_release(self, key):
@@ -194,4 +233,5 @@ class HotkeyListener(QObject):
         # Normal hold ends when either Ctrl or Alt released
         if not (self._ctrl_held and self._alt_held):
             self._recording = False
+            _log("emit released")
             self.released.emit()
