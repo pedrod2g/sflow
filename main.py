@@ -24,6 +24,7 @@ from core.paste import paste_text, paste_last_transcript, save_frontmost_app
 from core.command_mode import CommandModeHandler, copy_selection
 from core.dictation_actions import extract_actions, perform_actions
 from core.transform import TransformHandler
+from core.logger import log, log_exc
 from db.database import TranscriptionDB
 from web.server import start_web_server
 from config import LOGO_PATH, APP_DATA_DIR, AUDIO_DIR, get_setting
@@ -247,32 +248,42 @@ class SFlowApp(QObject):
         ).start()
 
     def _transcribe_worker(self, wav_buffer, duration, audio_path=None):
+        log(f"transcribe start: duration={duration:.2f}s, audio_path={audio_path}")
         try:
             text, model_id = self.transcriber.transcribe(wav_buffer)
+            log(f"transcribe ok: model={model_id}, chars={len(text) if text else 0}, text[:60]={(text or '')[:60]!r}")
             if text:
-                # Stash audio_path so _on_transcription_done can persist it with the row
                 self._pending_audio_path = audio_path
                 self.transcription_done.emit(text, duration, model_id)
             else:
+                log("transcribe returned empty text", level="WARN")
                 self.transcription_error.emit("No speech detected")
         except Exception as e:
+            log_exc("transcribe FAILED", e)
             self.transcription_error.emit(str(e))
 
     @pyqtSlot(str, float, str)
     def _on_transcription_done(self, text: str, duration: float, model_id: str):
-        # Extract trailing voice actions like "press enter"
+        log(f"transcription_done: chars={len(text)}, text[:60]={text[:60]!r}")
         final_text, actions = extract_actions(text)
-        paste_text(final_text)
+        try:
+            paste_text(final_text)
+            log("paste ok")
+        except Exception as e:
+            log_exc("paste FAILED", e)
         if actions:
             from PyQt6.QtCore import QTimer
             QTimer.singleShot(60, lambda: perform_actions(actions))
         self._last_text = final_text
         audio_path = getattr(self, "_pending_audio_path", None)
         self._pending_audio_path = None
-        self.db.insert(
-            text=final_text, duration_seconds=duration,
-            model=model_id, audio_path=audio_path,
-        )
+        try:
+            self.db.insert(
+                text=final_text, duration_seconds=duration,
+                model=model_id, audio_path=audio_path,
+            )
+        except Exception as e:
+            log_exc("db.insert FAILED", e)
         self.pill.set_state(PillWidget.STATE_DONE)
 
     @pyqtSlot()
@@ -319,7 +330,7 @@ class SFlowApp(QObject):
 
     @pyqtSlot(str)
     def _on_transcription_error(self, error: str):
-        print(f"Transcription error: {error}")
+        log(f"ERROR state: {error}", level="ERROR")
         self.pill.set_state(PillWidget.STATE_ERROR)
 
     # ------- Command Mode flow -------

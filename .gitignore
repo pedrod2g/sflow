@@ -17,3 +17,4 @@ start_sflow.sh
 logo-v*.png
 logo-*-clean.png
 *.iconset/
+PROMPT-RUST.md
