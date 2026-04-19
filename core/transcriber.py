@@ -1,34 +1,56 @@
+"""Transcription router. Orchestrates the full pipeline:
+
+   audio → (Groq | Local) → smart_commands → LLM cleanup (tone-aware) → text
+
+All post-processing steps are toggleable via settings.json.
+"""
 import io
-import os
-from groq import Groq
-from config import GROQ_MODEL, WHISPER_LANGUAGE
+from config import get_setting
+from core.transcriber_groq import GroqTranscriber
+from core.transcriber_local import LocalTranscriber
+from core.llm_cleanup import LLMCleanup
+from core.smart_commands import apply as apply_smart_commands
+from core.dictionary import as_whisper_prompt
+from core.context import tone_for_active_app
 
 
 class Transcriber:
     def __init__(self):
-        self._client = None
+        self._groq = GroqTranscriber()
+        self._local = LocalTranscriber()
+        self._cleanup = LLMCleanup()
 
-    def _get_client(self) -> Groq:
-        """Lazy init: creates client on first use so API key from first-run dialog works."""
-        if self._client is None:
-            key = os.getenv("GROQ_API_KEY", "")
-            if not key:
-                raise ValueError("GROQ_API_KEY not configured")
-            self._client = Groq(api_key=key, timeout=10.0)
-        return self._client
+    def _pick_backend(self):
+        backend = get_setting("transcribe_backend", "groq")
+        if backend == "local" and self._local.available:
+            return self._local
+        return self._groq
 
-    def transcribe(self, wav_buffer: io.BytesIO) -> str:
-        """Send WAV audio to Groq Whisper and return transcribed text."""
-        wav_buffer.seek(0)
-        data = wav_buffer.read()
-        if len(data) < 100:
-            return ""
-        transcription = self._get_client().audio.transcriptions.create(
-            file=("recording.wav", data),
-            model=GROQ_MODEL,
-            language=WHISPER_LANGUAGE,
-            response_format="text",
-            temperature=0.0,
-        )
-        text = transcription.strip() if isinstance(transcription, str) else str(transcription).strip()
-        return text
+    def transcribe(self, wav_buffer: io.BytesIO) -> tuple[str, str]:
+        """Returns (final_text, model_id_used)."""
+        backend = self._pick_backend()
+
+        # Whisper vocabulary hint (only Groq supports it meaningfully; local ignores)
+        vocab = ""
+        if get_setting("personal_dictionary_enabled", True):
+            vocab = as_whisper_prompt()
+
+        raw = backend.transcribe(wav_buffer, vocabulary_prompt=vocab)
+        if not raw:
+            return "", backend.model_id
+
+        # Smart commands — regex pass, cheap
+        if get_setting("smart_commands_enabled", True):
+            raw = apply_smart_commands(raw)
+
+        # LLM cleanup — tone-aware
+        if get_setting("llm_cleanup_enabled", True):
+            tone = "default"
+            if get_setting("context_aware_tone", True):
+                try:
+                    tone = tone_for_active_app()
+                except Exception:
+                    tone = "default"
+            raw = self._cleanup.clean(raw, tone=tone)
+
+        return raw.strip(), backend.model_id

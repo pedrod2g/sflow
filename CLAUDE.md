@@ -38,9 +38,18 @@ ditto dist/SFlow.app /Applications/SFlow.app
 xattr -cr /Applications/SFlow.app
 ```
 
-The .app bundle is self-contained (~107MB). No Python, no venv, no terminal needed.
-On first launch, if no API key exists in `~/Library/Application Support/SFlow/.env`,
-a dialog asks for it. The app lives in the menu bar (no Dock icon).
+The .app bundle is self-contained (~118MB, parakeet/mlx-whisper excluded).
+No Python, no venv, no terminal needed. On first launch, if no API key exists
+in `~/Library/Application Support/SFlow/.env`, a dialog asks for it. The app
+lives in the menu bar (no Dock icon).
+
+### Local backend (opt-in, Apple Silicon)
+```bash
+source venv/bin/activate
+pip install mlx-whisper
+# Hub → Ajustes → Backend → mlx-whisper
+```
+First transcription downloads the model (~244MB for `whisper-small-mlx`).
 
 ### Build Requirements
 - Python 3.12+ with venv
@@ -53,48 +62,98 @@ a dialog asks for it. The app lives in the menu bar (no Dock icon).
 - **Microphone**: Automatically requested on first use
 - **Input Monitoring**: May be required for pynput — add your Terminal/IDE
 
-## Project Structure
+## Benchmark: local model selection (M-series, Spanish voice, real samples)
+
+| Model | short 3s | medium 10s | long 30s | Notes |
+|---|---|---|---|---|
+| whisper-tiny-mlx | 0.31s 🥇 | 3.13s | 10.91s | fastest for short clips, weaker punctuation |
+| whisper-base-mlx | 2.57s | 5.09s | 6.34s | ok |
+| **whisper-small-mlx** | 1.11s | **1.05s** 🥇 | **3.92s** 🥇 | **default** — best overall |
+| whisper-large-v3-turbo | 4.68s | 5.11s | 10.70s | slower than cloud Groq |
+| parakeet-tdt-0.6b-v3 | 2.87s | 4.21s | 7.70s | promising but slow in practice |
+| faster-whisper (CT2) | — | — | — | not tested: poor on ARM |
+
+Bench script: `/tmp/sflow_bench/bench.py` (generates voice via `say -v Paulina`,
+16kHz mono WAV, warms up each model, records hot inference time).
+
+## Project Structure (v2.5 — with Hub + CGEvent paste + benchmarked local)
 
 ```
 sflow/
-├── main.py                 # Entry point — tray icon, first-run dialog, launch-at-login, app controller
-├── config.py               # All configuration constants (UI, audio, paths, bundle detection)
-├── sflow.spec              # PyInstaller spec for building .app bundle
-├── build.sh                # One-shot build script (icns → PyInstaller → sign)
+├── main.py                      # Tray + controller (regular + command-mode flows)
+├── config.py                    # Constants + runtime settings (settings.json)
+├── sflow.spec                   # PyInstaller spec
+├── build.sh                     # icns → PyInstaller → sign
 ├── ui/
-│   ├── pill_widget.py      # Floating pill overlay (native macOS via PyObjC)
-│   └── audio_visualizer.py # Real-time audio bars
+│   ├── pill_widget.py           # NSPanel + Liquid Glass (NSVisualEffectView)
+│   ├── audio_visualizer.py      # FFT + spring physics 60Hz
+│   └── settings_dialog.py       # QDialog for all toggles
 ├── core/
-│   ├── recorder.py         # sounddevice audio capture
-│   ├── transcriber.py      # Groq Whisper API client (lazy init, 10s timeout)
-│   ├── hotkey.py           # Global hotkeys (Ctrl+Shift hold + double-tap Ctrl)
-│   └── clipboard.py        # Focus save/restore + native paste via AppleScript
-├── db/
-│   └── database.py         # SQLite CRUD
-├── web/
-│   └── server.py           # Flask dashboard at localhost:5678 (auto-finds free port)
-├── logo.png                # Brand logo (full size, used for .icns generation)
-├── logo_small.png          # Brand logo (22x22 for menu bar + pill)
-├── SFlow.icns              # macOS app icon (generated from logo.png)
-├── requirements.txt
-├── .env                    # GROQ_API_KEY (never committed)
-└── .env.example
+│   ├── recorder.py              # sounddevice capture
+│   ├── transcriber.py           # Router (backend → commands → LLM cleanup)
+│   ├── transcriber_groq.py      # Groq Whisper Large v3 Turbo
+│   ├── transcriber_local.py     # parakeet-mlx (optional, offline, Apple Silicon)
+│   ├── llm_cleanup.py           # Groq Llama 3.1 8B instant — filler removal + tone
+│   ├── context.py               # NSWorkspace frontmost app → tone profile
+│   ├── dictionary.py            # Personal vocab → Whisper prompt hint
+│   ├── smart_commands.py        # "nueva línea" → \n, "coma" → ", ", etc.
+│   ├── command_mode.py          # Select+speak+LLM transform flow
+│   ├── hotkey.py                # 4 modes (hold, double-tap, command, mouse)
+│   └── clipboard.py             # Focus save/restore + streaming paste
+├── db/database.py               # SQLite history (model column tracks backend used)
+├── web/server.py                # Flask dashboard localhost:5678
+└── ~/Library/Application Support/SFlow/
+    ├── .env                     # GROQ_API_KEY
+    ├── settings.json            # User toggles (generated on save)
+    ├── dictionary.txt           # Personal vocabulary (one term per line)
+    └── transcriptions.db        # History
 ```
 
-## Architecture & Data Flow
+## Hotkeys (v2.5)
 
+| Combo | Mode |
+|---|---|
+| Ctrl+Alt hold | Regular recording |
+| Double-tap Ctrl, tap again to stop | Hands-free |
+| Ctrl+Shift hold | **Command Mode** — transforms selected text via LLM |
+| Mouse button (middle/Mouse4/Mouse5) | Regular recording (opt-in, Settings) |
+| Cmd+Shift+H | Open Hub (history + dictionary + settings) |
+| Cmd+Ctrl+V | Paste Last Transcript (Wispr Flow convention) |
+| Trailing "press enter" / "dale enter" | Auto-press Enter after paste |
+
+## Architecture & Data Flow (v2)
+
+### Regular transcription
 ```
 Hotkey Press (pynput thread)
   → [QueuedConnection] → save_frontmost_app() + recorder.start()
-  → pill.set_state(RECORDING)
-  → sounddevice callback → queue.Queue → QTimer → audio_visualizer paints bars
+  → pill.set_state(RECORDING) → FFT visualizer at 60fps
 
-Hotkey Release (pynput thread)
+Hotkey Release
   → [QueuedConnection] → recorder.stop()
   → pill.set_state(PROCESSING)
-  → background Thread: transcriber.transcribe(wav_buffer)
-    → Groq Whisper API returns text
-    → [QueuedConnection] → paste_text() + db.insert() + pill.set_state(DONE)
+  → background Thread: Transcriber.transcribe(wav)
+      → backend = GroqTranscriber OR LocalTranscriber (setting-driven)
+      → vocabulary = dictionary.as_whisper_prompt()  (Whisper `prompt=` hint)
+      → raw = backend.transcribe(wav, vocabulary)
+      → raw = smart_commands.apply(raw)              (regex pass)
+      → tone = context.tone_for_active_app()
+      → final = llm_cleanup.clean(raw, tone)         (Llama 3.1 8B instant, ~150ms)
+      → (final, model_id)
+  → [QueuedConnection] → paste_text() + db.insert(model=model_id) + DONE
+```
+
+### Command Mode
+```
+Ctrl+Shift Press
+  → save_frontmost_app() + copy_selection() (Cmd+C → clipboard diff)
+  → recorder.start() + pill.RECORDING
+
+Release
+  → recorder.stop() + PROCESSING
+  → GroqTranscriber (raw STT, no cleanup) → voice_command
+  → CommandModeHandler.transform(voice, selection) → Llama transforms text
+  → paste_text(result) → replaces selection
 ```
 
 ## Critical Implementation Details

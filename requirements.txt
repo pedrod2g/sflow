@@ -6,3 +6,10 @@ groq>=0.4.0
 python-dotenv>=1.0.0
 flask>=3.0.0
 pyobjc-framework-Cocoa>=10.0
+pyobjc-framework-Quartz>=10.0
+
+# --- Optional: local offline transcription (Apple Silicon only) ---
+# Benchmark winner for Spanish voice: mlx-whisper small (244MB, 1s/10s audio).
+# Install manually:
+#   pip install mlx-whisper
+# Then Hub → Ajustes → Backend → Local.

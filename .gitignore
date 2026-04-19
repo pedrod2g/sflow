@@ -1,5 +1,7 @@
 .env
 transcriptions.db
+dictionary.txt
+settings.json
 __pycache__/
 *.pyc
 .DS_Store

@@ -1,5 +1,6 @@
 #!/usr/bin/env python3
-"""SFlow - Voice-to-text desktop tool powered by Groq Whisper."""
+"""SFlow — Voice-to-text desktop tool. Groq Whisper + optional local parakeet,
+LLM cleanup, per-app tone, Command Mode, Liquid Glass pill."""
 
 import os
 import sys
@@ -14,17 +15,20 @@ from PyQt6.QtCore import Qt, QObject, pyqtSignal, pyqtSlot
 from PyQt6.QtGui import QIcon, QPixmap, QAction
 
 from ui.pill_widget import PillWidget
+from ui.hub_window import HubWindow
 from core.recorder import AudioRecorder
 from core.transcriber import Transcriber
+from core.transcriber_groq import GroqTranscriber
 from core.hotkey import HotkeyListener
-from core.clipboard import paste_text, save_frontmost_app
+from core.paste import paste_text, paste_last_transcript, save_frontmost_app
+from core.command_mode import CommandModeHandler, copy_selection
+from core.dictation_actions import extract_actions, perform_actions
 from db.database import TranscriptionDB
 from web.server import start_web_server
-from config import LOGO_PATH, APP_DATA_DIR, GROQ_API_KEY
+from config import LOGO_PATH, APP_DATA_DIR
 
 
 def _ensure_accessibility() -> bool:
-    """Prompt macOS to grant Accessibility if not trusted. Returns True if already trusted."""
     try:
         from ApplicationServices import AXIsProcessTrustedWithOptions
         return AXIsProcessTrustedWithOptions({"AXTrustedCheckOptionPrompt": True})
@@ -32,20 +36,14 @@ def _ensure_accessibility() -> bool:
         return True
 
 
-# LaunchAgent constants
 _LAUNCH_AGENT_LABEL = "so.saasfactory.sflow"
 _PLIST_PATH = os.path.expanduser(f"~/Library/LaunchAgents/{_LAUNCH_AGENT_LABEL}.plist")
 
 
-# ---------------------------------------------------------------------------
-# First-run dialog
-# ---------------------------------------------------------------------------
 class FirstRunDialog(QDialog):
-    """Shown when GROQ_API_KEY is missing on first launch."""
-
     def __init__(self):
         super().__init__()
-        self.setWindowTitle("SFlow - Setup")
+        self.setWindowTitle("SFlow — Setup")
         self.setFixedWidth(420)
 
         layout = QVBoxLayout()
@@ -77,14 +75,10 @@ class FirstRunDialog(QDialog):
         with open(env_path, "w") as f:
             f.write(f"GROQ_API_KEY={key}\n")
 
-        # Set in current process so Transcriber picks it up
         os.environ["GROQ_API_KEY"] = key
         self.accept()
 
 
-# ---------------------------------------------------------------------------
-# Launch at Login
-# ---------------------------------------------------------------------------
 def _is_launch_at_login() -> bool:
     return os.path.exists(_PLIST_PATH)
 
@@ -92,7 +86,6 @@ def _is_launch_at_login() -> bool:
 def _set_launch_at_login(enabled: bool):
     if enabled:
         if getattr(sys, "frozen", False):
-            # In .app bundle: executable is Contents/MacOS/SFlow
             exe = sys.executable
         else:
             exe = os.path.abspath(sys.argv[0])
@@ -123,13 +116,9 @@ def _set_launch_at_login(enabled: bool):
             os.remove(_PLIST_PATH)
 
 
-# ---------------------------------------------------------------------------
-# System tray
-# ---------------------------------------------------------------------------
-def _setup_tray(app: QApplication, port: int) -> QSystemTrayIcon:
+def _setup_tray(app: QApplication, port: int, open_hub) -> QSystemTrayIcon:
     pixmap = QPixmap(LOGO_PATH)
     if pixmap.isNull():
-        # Fallback: empty icon (shouldn't happen but don't crash)
         icon = QIcon()
     else:
         icon = QIcon(pixmap.scaled(22, 22, Qt.AspectRatioMode.KeepAspectRatio, Qt.TransformationMode.SmoothTransformation))
@@ -138,12 +127,16 @@ def _setup_tray(app: QApplication, port: int) -> QSystemTrayIcon:
 
     menu = QMenu()
 
-    status = QAction("SFlow - Activo", menu)
+    status = QAction("SFlow — Activo", menu)
     status.setEnabled(False)
     menu.addAction(status)
     menu.addSeparator()
 
-    dashboard = QAction(f"Abrir Dashboard (:{port})", menu)
+    hub_action = QAction("Abrir Hub  (⌘⇧H)", menu)
+    hub_action.triggered.connect(open_hub)
+    menu.addAction(hub_action)
+
+    dashboard = QAction(f"Dashboard web (:{port})", menu)
     dashboard.triggered.connect(lambda: subprocess.run(["open", f"http://localhost:{port}"], capture_output=True))
     menu.addAction(dashboard)
     menu.addSeparator()
@@ -159,43 +152,62 @@ def _setup_tray(app: QApplication, port: int) -> QSystemTrayIcon:
     quit_action.triggered.connect(app.quit)
     menu.addAction(quit_action)
 
+    # Also open hub on single left-click on the tray icon
+    def _activate(reason):
+        if reason == QSystemTrayIcon.ActivationReason.Trigger:
+            open_hub()
+    tray.activated.connect(_activate)
+
     tray.setContextMenu(menu)
-    tray.setToolTip("SFlow - Voice to Text")
+    tray.setToolTip("SFlow — Voice to Text")
     tray.show()
     return tray
 
 
-# ---------------------------------------------------------------------------
-# Main app controller
-# ---------------------------------------------------------------------------
 class SFlowApp(QObject):
-    """Main application controller. Wires hotkey -> recorder -> transcriber -> clipboard."""
+    """Main controller. Wires hotkey -> recorder -> transcriber -> clipboard,
+    plus Command Mode side-channel."""
 
-    transcription_done = pyqtSignal(str, float)
+    transcription_done = pyqtSignal(str, float, str)  # text, duration, model_id
     transcription_error = pyqtSignal(str)
+    command_done = pyqtSignal(str)
+    command_error = pyqtSignal(str)
 
     def __init__(self):
         super().__init__()
         self.recorder = AudioRecorder()
         self.transcriber = Transcriber()
+        self.groq_raw = GroqTranscriber()  # raw STT for command mode (no LLM cleanup)
+        self.command = CommandModeHandler()
         self.db = TranscriptionDB()
         self.hotkey = HotkeyListener()
         self.pill = PillWidget()
+        self.hub = HubWindow(self.db)
 
-        # Connect visualizer to recorder's audio queue
+        self._selected_text_snapshot = ""
+        self._last_text: str = ""  # For "paste last transcript" hotkey
+
         self.pill.visualizer.set_audio_queue(self.recorder.audio_queue)
 
-        # MUST use QueuedConnection: pynput emits from its own thread
+        # Signals — all QueuedConnection (pynput emits from its own thread)
         self.hotkey.pressed.connect(self._on_hotkey_pressed, Qt.ConnectionType.QueuedConnection)
         self.hotkey.released.connect(self._on_hotkey_released, Qt.ConnectionType.QueuedConnection)
+        self.hotkey.command_pressed.connect(self._on_command_pressed, Qt.ConnectionType.QueuedConnection)
+        self.hotkey.command_released.connect(self._on_command_released, Qt.ConnectionType.QueuedConnection)
+        self.hotkey.hub_requested.connect(self._on_hub_requested, Qt.ConnectionType.QueuedConnection)
+        self.hotkey.paste_last_requested.connect(self._on_paste_last, Qt.ConnectionType.QueuedConnection)
+
         self.transcription_done.connect(self._on_transcription_done, Qt.ConnectionType.QueuedConnection)
         self.transcription_error.connect(self._on_transcription_error, Qt.ConnectionType.QueuedConnection)
+        self.command_done.connect(self._on_command_done, Qt.ConnectionType.QueuedConnection)
+        self.command_error.connect(self._on_transcription_error, Qt.ConnectionType.QueuedConnection)
 
     def start(self):
         self.hotkey.start()
         self.pill.show()
         self.pill.set_state(PillWidget.STATE_IDLE)
 
+    # ------- Regular transcription flow -------
     @pyqtSlot()
     def _on_hotkey_pressed(self):
         save_frontmost_app()
@@ -213,71 +225,156 @@ class SFlowApp(QObject):
 
         wav_buffer = self.recorder.get_wav_buffer()
         recording_duration = self.recorder.get_duration()
-        thread = threading.Thread(
+        threading.Thread(
             target=self._transcribe_worker,
             args=(wav_buffer, recording_duration),
             daemon=True,
-        )
-        thread.start()
+        ).start()
 
     def _transcribe_worker(self, wav_buffer, duration):
         try:
-            text = self.transcriber.transcribe(wav_buffer)
+            text, model_id = self.transcriber.transcribe(wav_buffer)
             if text:
-                self.transcription_done.emit(text, duration)
+                self.transcription_done.emit(text, duration, model_id)
             else:
                 self.transcription_error.emit("No speech detected")
         except Exception as e:
             self.transcription_error.emit(str(e))
 
-    @pyqtSlot(str, float)
-    def _on_transcription_done(self, text: str, duration: float):
-        paste_text(text)
-        self.db.insert(text=text, duration_seconds=duration)
+    @pyqtSlot(str, float, str)
+    def _on_transcription_done(self, text: str, duration: float, model_id: str):
+        # Extract trailing voice actions like "press enter"
+        final_text, actions = extract_actions(text)
+        paste_text(final_text)
+        if actions:
+            # Small delay so text lands before Enter
+            from PyQt6.QtCore import QTimer
+            QTimer.singleShot(60, lambda: perform_actions(actions))
+        self._last_text = final_text
+        self.db.insert(text=final_text, duration_seconds=duration, model=model_id)
         self.pill.set_state(PillWidget.STATE_DONE)
+
+    @pyqtSlot()
+    def _on_hub_requested(self):
+        # Temporarily activate the app so the Hub can receive keyboard focus
+        # even though we're in accessory (menu-bar-only) policy.
+        try:
+            import AppKit
+            AppKit.NSApp.activateIgnoringOtherApps_(True)
+        except Exception:
+            pass
+        self.hub.show()
+        self.hub.raise_()
+        self.hub.activateWindow()
+
+    @pyqtSlot()
+    def _on_paste_last(self):
+        # Prefer the in-memory last; fall back to DB most recent
+        text = self._last_text
+        if not text:
+            rows = self.db.get_recent(limit=1)
+            if rows:
+                text = rows[0].get("text") or ""
+        if text:
+            paste_last_transcript(text)
 
     @pyqtSlot(str)
     def _on_transcription_error(self, error: str):
+        print(f"Transcription error: {error}")
         self.pill.set_state(PillWidget.STATE_ERROR)
 
+    # ------- Command Mode flow -------
+    @pyqtSlot()
+    def _on_command_pressed(self):
+        save_frontmost_app()
+        # Snapshot selection BEFORE we grab focus for recording
+        self._selected_text_snapshot = copy_selection()
+        self.recorder.start()
+        self.pill.set_state(PillWidget.STATE_RECORDING)
 
-# ---------------------------------------------------------------------------
-# Entry point
-# ---------------------------------------------------------------------------
+    @pyqtSlot()
+    def _on_command_released(self):
+        duration = self.recorder.stop()
+        self.pill.set_state(PillWidget.STATE_PROCESSING)
+
+        if duration < 0.3:
+            self.pill.set_state(PillWidget.STATE_IDLE)
+            self._selected_text_snapshot = ""
+            return
+
+        wav_buffer = self.recorder.get_wav_buffer()
+        selection = self._selected_text_snapshot
+        self._selected_text_snapshot = ""
+        threading.Thread(
+            target=self._command_worker,
+            args=(wav_buffer, selection, duration),
+            daemon=True,
+        ).start()
+
+    def _command_worker(self, wav_buffer, selection, duration):
+        try:
+            # Command Mode always uses Groq (fast cloud STT) — bypass local backend
+            voice = self.groq_raw.transcribe(wav_buffer)
+            if not voice:
+                self.command_error.emit("No voice command detected")
+                return
+            result = self.command.transform(voice, selection)
+            # Persist both voice command and result for history
+            try:
+                self.db.insert(
+                    text=f"[CMD] {voice} → {result[:200]}",
+                    duration_seconds=duration,
+                    model="command-mode",
+                )
+            except Exception:
+                pass
+            self.command_done.emit(result)
+        except Exception as e:
+            self.command_error.emit(str(e))
+
+    @pyqtSlot(str)
+    def _on_command_done(self, result: str):
+        paste_text(result)
+        self._last_text = result
+        self.pill.set_state(PillWidget.STATE_DONE)
+
+
 def main():
     app = QApplication(sys.argv)
     app.setApplicationName("SFlow")
     app.setQuitOnLastWindowClosed(False)
 
-    # Allow Ctrl+C to kill the app
     signal.signal(signal.SIGINT, signal.SIG_DFL)
 
-    # First-run: ask for API key if missing (BEFORE hiding from Dock so dialog is visible)
     api_key = os.getenv("GROQ_API_KEY", "")
     if not api_key:
         dialog = FirstRunDialog()
         if dialog.exec() != QDialog.DialogCode.Accepted:
             sys.exit(0)
 
-    # Hide from Dock AFTER first-run dialog — menu bar only
     try:
         import AppKit
         AppKit.NSApp.setActivationPolicy_(AppKit.NSApplicationActivationPolicyAccessory)
     except Exception:
-        pass  # Non-critical: just means Dock icon stays
+        pass
 
-    # Start web dashboard
     port = start_web_server()
-
-    # Request Accessibility permission (shows macOS prompt if not granted)
     _ensure_accessibility()
 
-    # Start the app
     sflow = SFlowApp()
     sflow.start()
 
-    # System tray icon
-    tray = _setup_tray(app, port)  # noqa: F841 — must keep reference alive
+    def open_hub():
+        try:
+            import AppKit
+            AppKit.NSApp.activateIgnoringOtherApps_(True)
+        except Exception:
+            pass
+        sflow.hub.show()
+        sflow.hub.raise_()
+        sflow.hub.activateWindow()
+
+    tray = _setup_tray(app, port, open_hub)  # noqa: F841
 
     sys.exit(app.exec())
 
