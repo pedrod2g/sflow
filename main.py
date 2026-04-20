@@ -22,7 +22,6 @@ from core.transcriber_groq import GroqTranscriber
 from core.hotkey import HotkeyListener
 from core.paste import paste_text, paste_last_transcript, save_frontmost_app
 from core.command_mode import CommandModeHandler, copy_selection
-from core.dictation_actions import extract_actions, perform_actions
 from core.transform import TransformHandler
 from core.logger import log, log_exc
 from db.database import TranscriptionDB
@@ -265,15 +264,12 @@ class SFlowApp(QObject):
     @pyqtSlot(str, float, str)
     def _on_transcription_done(self, text: str, duration: float, model_id: str):
         log(f"transcription_done: chars={len(text)}, text[:60]={text[:60]!r}")
-        final_text, actions = extract_actions(text)
+        final_text = text
         try:
             paste_text(final_text)
             log("paste ok")
         except Exception as e:
             log_exc("paste FAILED", e)
-        if actions:
-            from PyQt6.QtCore import QTimer
-            QTimer.singleShot(60, lambda: perform_actions(actions))
         self._last_text = final_text
         audio_path = getattr(self, "_pending_audio_path", None)
         self._pending_audio_path = None

@@ -4,6 +4,34 @@ from groq import Groq
 from config import GROQ_MODEL, WHISPER_LANGUAGE
 
 
+_HALLUCINATION_MARKERS = (
+    "gracias por ver el video",
+    "gracias por ver este video",
+    "gracias por ver.",
+    "subtitulado por la comunidad",
+    "subtítulos por la comunidad",
+    "subtitulos realizados por la comunidad",
+    "subtítulos realizados por la comunidad",
+    "amara.org",
+    "suscríbete al canal",
+    "suscribete al canal",
+    "thank you for watching",
+    "thanks for watching",
+    "please subscribe",
+    "see you next time",
+    "estoy listo para ayudarte",
+    "¿qué transcripción de voz necesitas",
+    "que transcripcion de voz necesitas",
+)
+
+
+def _is_hallucination(text: str) -> bool:
+    if not text:
+        return False
+    lowered = text.lower()
+    return any(marker in lowered for marker in _HALLUCINATION_MARKERS)
+
+
 class GroqTranscriber:
     """Cloud transcription via Groq Whisper Large v3 Turbo."""
 
@@ -34,6 +62,8 @@ class GroqTranscriber:
             kwargs["prompt"] = vocabulary_prompt
         transcription = self._get_client().audio.transcriptions.create(**kwargs)
         text = transcription.strip() if isinstance(transcription, str) else str(transcription).strip()
+        if _is_hallucination(text):
+            return ""
         return text
 
     @property
