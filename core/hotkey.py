@@ -175,7 +175,7 @@ class HotkeyListener(QObject):
                 # Also support plain digits in case layout differs
                 if ch in _OPT_DIGIT_MAP:
                     idx = _OPT_DIGIT_MAP[ch]
-                elif ch in "12345678":
+                elif ch and ch in "12345678":
                     idx = int(ch) - 1
                 else:
                     idx = None
