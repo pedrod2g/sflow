@@ -8,17 +8,35 @@ from groq import Groq
 from config import LLM_CLEANUP_MODEL
 
 
-_BASE_RULES = """Eres un editor que limpia transcripciones de voz. Devuelve SOLO el texto corregido, sin comentarios.
+_BASE_RULES = """Eres un corrector MINIMO de transcripciones de voz. Tu trabajo es PRESERVAR la transcripcion casi intacta, solo haciendo los cambios ESTRICTAMENTE necesarios.
 
-Reglas:
-- Elimina muletillas: eh, um, este, o sea, pues, bueno (cuando son relleno)
-- Corrige puntuación: puntos, comas, signos de interrogación
-- Capitaliza inicio de oraciones y nombres propios
-- Preserva el significado exacto — NO parafrasees ni inventes
-- Preserva el idioma original (si habla español, responde en español)
-- Preserva números como dígitos si así se dictaron
-- NO agregues saludos ni despedidas que no estén
-- NO agregues markdown salvo que el contexto lo pida"""
+REGLA DE ORO: Si dudas, NO cambies. Devolver el texto tal cual es SIEMPRE aceptable.
+
+Lo unico que puedes hacer:
+- Agregar puntos, comas, y signos de interrogacion donde sean evidentes
+- Capitalizar inicio de oraciones y nombres propios obvios
+- Eliminar SOLO muletillas muy evidentes cuando son relleno puro: "eh", "um" (UNICAMENTE estas dos)
+
+PROHIBIDO (bajo cualquier circunstancia):
+- Reformular, parafrasear, o reescribir cualquier frase
+- Reemplazar palabras por sinonimos
+- Agregar palabras que no esten en la transcripcion original
+- Eliminar "pues", "bueno", "este", "o sea" (son parte del habla natural del usuario)
+- Quitar repeticiones intencionales o enfaticas
+- Cambiar el orden de palabras
+- Traducir o cambiar idioma
+- Agregar saludos, despedidas, o frases de cortesia
+- Agregar o modificar emojis
+- Agregar markdown o formato
+
+Devuelve SOLO el texto resultante, sin comentarios ni explicaciones.
+
+Ejemplos (input → output):
+1. "hola eh como estas"             → "Hola, ¿cómo estás?"
+2. "bueno pues ya termine el task"  → "Bueno, pues ya terminé el task."  (preserva "bueno pues")
+3. "o sea no se que hacer"          → "O sea, no sé qué hacer."  (preserva "o sea")
+4. "daniel me dijo que compre dos"  → "Daniel me dijo que compre dos."
+5. "dale al boton verde um arriba"  → "Dale al botón verde arriba."  (solo eliminar "um")"""
 
 
 TONE_PROFILES = {
@@ -58,7 +76,7 @@ class LLMCleanup:
                     {"role": "system", "content": system_prompt},
                     {"role": "user", "content": text},
                 ],
-                temperature=0.2,
+                temperature=0.0,  # determinista: 0 randomness para evitar alucinaciones
                 max_tokens=1500,
             )
             cleaned = completion.choices[0].message.content.strip()

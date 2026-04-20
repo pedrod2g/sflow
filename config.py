@@ -33,8 +33,8 @@ SETTINGS_PATH = os.path.join(_DATA_DIR, "settings.json")
 def _default_settings() -> dict:
     return {
         "transcribe_backend": "groq",   # "groq" | "local"
-        "llm_cleanup_enabled": True,
-        "llm_model": "llama-3.1-8b-instant",
+        "llm_cleanup_enabled": False,  # OFF por default: fidelidad > limpieza. Opt-in en Hub si se desea auto-puntuacion.
+        "llm_model": "llama-3.3-70b-versatile",  # modelo con mejor instruction-following (menos alucinaciones)
         "context_aware_tone": True,
         "smart_commands_enabled": True,
         "personal_dictionary_enabled": True,
@@ -97,7 +97,7 @@ def set_setting(key: str, value):
 # --- Groq API ---
 GROQ_API_KEY = os.getenv("GROQ_API_KEY", "")
 GROQ_MODEL = "whisper-large-v3-turbo"
-LLM_CLEANUP_MODEL = "llama-3.1-8b-instant"  # fast cleanup ~100-200ms
+LLM_CLEANUP_MODEL = "llama-3.3-70b-versatile"  # mejor fidelidad que 8b (~300-500ms vs 100-200ms)
 WHISPER_LANGUAGE = "es"
 
 # --- Local model (mlx-whisper, optional) ---
