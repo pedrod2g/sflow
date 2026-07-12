@@ -4,7 +4,7 @@ from PyQt6.QtWidgets import (
     QPushButton, QGroupBox, QFrame, QLineEdit, QMessageBox,
 )
 from PyQt6.QtCore import Qt
-from config import get_setting, set_setting, DICTIONARY_PATH
+from config import get_setting, set_setting, DICTIONARY_PATH, STT_MODELS
 import os
 import subprocess
 
@@ -18,15 +18,22 @@ class SettingsDialog(QDialog):
         root = QVBoxLayout()
         root.setSpacing(12)
 
-        # --- Backend ---
-        backend_group = QGroupBox("Motor de transcripción")
+        # --- Modelo de transcripción ---
+        backend_group = QGroupBox("Modelo de transcripción")
         bl = QVBoxLayout()
-        self.backend_combo = QComboBox()
-        self.backend_combo.addItem("Groq (cloud, rápido, requiere internet)", "groq")
-        self.backend_combo.addItem("Local (parakeet-mlx, offline, requiere instalación)", "local")
-        current = get_setting("transcribe_backend", "groq")
-        self.backend_combo.setCurrentIndex(0 if current == "groq" else 1)
-        bl.addWidget(self.backend_combo)
+        self.model_combo = QComboBox()
+        for m in STT_MODELS:
+            self.model_combo.addItem(m["label"], m["id"])
+        current = get_setting("stt_model", "whisper-turbo-local")
+        idx = max(0, self.model_combo.findData(current))
+        self.model_combo.setCurrentIndex(idx)
+        bl.addWidget(self.model_combo)
+        hint = QLabel(
+            "Local = offline, privado, gratis (Apple Silicon). Whisper Turbo = mejor\n"
+            "precisión y usa tu diccionario. Parakeet = más rápido. Groq = nube."
+        )
+        hint.setStyleSheet("color: gray; font-size: 11px;")
+        bl.addWidget(hint)
         backend_group.setLayout(bl)
         root.addWidget(backend_group)
 
@@ -116,7 +123,7 @@ class SettingsDialog(QDialog):
         subprocess.run(["open", "-a", "TextEdit", DICTIONARY_PATH], capture_output=True)
 
     def _save(self):
-        set_setting("transcribe_backend", self.backend_combo.currentData())
+        set_setting("stt_model", self.model_combo.currentData())
         set_setting("llm_cleanup_enabled", self.cb_llm.isChecked())
         set_setting("context_aware_tone", self.cb_context.isChecked())
         set_setting("smart_commands_enabled", self.cb_commands.isChecked())

@@ -32,7 +32,12 @@ SETTINGS_PATH = os.path.join(_DATA_DIR, "settings.json")
 
 def _default_settings() -> dict:
     return {
-        "transcribe_backend": "groq",   # "groq" | "local"
+        # Modelo de transcripcion activo. Ver STT_MODELS (abajo) para el catalogo.
+        # Default: Whisper Turbo LOCAL (mejor precision es + offline, gana a Groq en
+        # latencia y privacidad segun benchmark M4 12-jul-2026). Fallback a groq si
+        # el motor MLX no esta disponible en runtime.
+        "stt_model": "whisper-turbo-local",
+        "transcribe_backend": "groq",   # LEGACY — migrado a stt_model (ver load_settings)
         "llm_cleanup_enabled": False,  # OFF por default: fidelidad > limpieza. Opt-in en Hub si se desea auto-puntuacion.
         "llm_model": "llama-3.3-70b-versatile",  # modelo con mejor instruction-following (menos alucinaciones)
         "context_aware_tone": True,
@@ -71,6 +76,13 @@ def load_settings() -> dict:
         with open(SETTINGS_PATH) as f:
             loaded = json.load(f)
         defaults.update(loaded)
+        # --- Migracion legacy: transcribe_backend -> stt_model ---
+        # Si el settings viejo trae transcribe_backend pero no stt_model explicito,
+        # mapeamos: "groq" -> groq-turbo, "local" -> whisper (el local historico).
+        if "stt_model" not in loaded and "transcribe_backend" in loaded:
+            defaults["stt_model"] = (
+                "groq-turbo" if loaded["transcribe_backend"] == "groq" else "whisper-turbo-local"
+            )
         return defaults
     except Exception:
         return defaults
@@ -100,11 +112,46 @@ GROQ_MODEL = "whisper-large-v3-turbo"
 LLM_CLEANUP_MODEL = "llama-3.3-70b-versatile"  # mejor fidelidad que 8b (~300-500ms vs 100-200ms)
 WHISPER_LANGUAGE = "es"
 
-# --- Local model (mlx-whisper, optional) ---
-# Benchmark-winning default: whisper-small-mlx → 1s per 10s audio, 244MB.
-# Alternatives: "mlx-community/whisper-tiny-mlx" (faster for short clips),
-# "mlx-community/whisper-large-v3-turbo" (highest quality, slower).
-LOCAL_MODEL_ID = "mlx-community/whisper-small-mlx"
+# --- Catalogo de modelos STT seleccionables desde la app (Ajustes) ---
+# Benchmark M4 / 16GB / voz real es (12-jul-2026), latencia warm mediana + WER:
+#   Parakeet v3  : ~280ms  · WER 4.3% · el mas RAPIDO (motor de Handy), pierde en nombres propios
+#   Whisper Turbo: ~950ms  · WER 2.9% · MEJOR precision, acierta jerga, usa diccionario personal
+#   Groq (nube)  : ~1.4-2.7s · WER 2.9% · misma precision pero mas lento (red) + depende de internet
+# engine: "groq" | "whisper" (mlx-whisper) | "parakeet" (parakeet-mlx)
+STT_MODELS = [
+    {
+        "id": "whisper-turbo-local",
+        "label": "Whisper Turbo · LOCAL (mejor precision, offline)",
+        "engine": "whisper",
+        "model": "mlx-community/whisper-large-v3-turbo",
+        "local": True,
+    },
+    {
+        "id": "parakeet-v3",
+        "label": "Parakeet v3 · LOCAL (mas rapido, offline)",
+        "engine": "parakeet",
+        "model": "mlx-community/parakeet-tdt-0.6b-v3",
+        "local": True,
+    },
+    {
+        "id": "groq-turbo",
+        "label": "Groq · Whisper Turbo (nube, requiere internet)",
+        "engine": "groq",
+        "model": "whisper-large-v3-turbo",
+        "local": False,
+    },
+]
+
+_STT_BY_ID = {m["id"]: m for m in STT_MODELS}
+
+
+def get_stt_model() -> dict:
+    """Devuelve el dict del modelo STT activo (fallback a groq-turbo)."""
+    return _STT_BY_ID.get(get_setting("stt_model", "whisper-turbo-local"), _STT_BY_ID["groq-turbo"])
+
+
+# Back-compat: algunos modulos aun leen LOCAL_MODEL_ID directo.
+LOCAL_MODEL_ID = "mlx-community/whisper-large-v3-turbo"
 
 # --- Audio ---
 SAMPLE_RATE = 16000

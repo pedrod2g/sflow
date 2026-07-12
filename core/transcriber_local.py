@@ -1,9 +1,10 @@
 """Local transcription via mlx-whisper (Whisper on Apple MLX).
 
-Benchmark ganador (M-series, audio de voz real español):
-  - whisper-small-mlx: 1.0s (10s audio) — 10× realtime, $0, offline, 244MB
+Benchmark M4 / voz real es (12-jul-2026), whisper-large-v3-turbo:
+  ~950ms warm (10s audio) — mejor precision del stack, WER 2.9%, offline, $0.
+  mlx-whisper cachea el modelo cargado por repo => llamadas repetidas van warm.
 
-Opcional: `pip install mlx-whisper` (añade ~1.5GB con sus deps si no existen).
+Opcional: `pip install mlx-whisper` (Apple Silicon).
 """
 import io
 import tempfile
@@ -12,9 +13,14 @@ from config import LOCAL_MODEL_ID, WHISPER_LANGUAGE
 
 
 class LocalTranscriber:
-    """mlx-whisper backend. Lazy-loads model + first-run downloads from HF."""
+    """mlx-whisper backend. Lazy-loads model + first-run downloads from HF.
 
-    def __init__(self):
+    model_id es parametrizable (whisper-large-v3-turbo por defecto) para que el
+    router pueda ofrecer distintos tamanos de Whisper desde Ajustes.
+    """
+
+    def __init__(self, model_id: str = LOCAL_MODEL_ID):
+        self._model_id = model_id
         self._tried_import = False
         self._import_error: str | None = None
 
@@ -29,6 +35,22 @@ class LocalTranscriber:
                 self._import_error = str(e)
                 return False
         return self._import_error is None
+
+    def warm(self):
+        """Precarga el modelo en un audio de silencio para dejarlo residente."""
+        if not self.available:
+            return
+        import mlx_whisper
+        import numpy as np
+        try:
+            mlx_whisper.transcribe(
+                np.zeros(1600, dtype=np.float32),  # 0.1s de silencio
+                path_or_hf_repo=self._model_id,
+                language=WHISPER_LANGUAGE,
+                temperature=0.0,
+            )
+        except Exception:
+            pass
 
     def transcribe(self, wav_buffer: io.BytesIO, vocabulary_prompt: str = "") -> str:
         if not self.available:
@@ -48,7 +70,7 @@ class LocalTranscriber:
 
         try:
             kwargs = {
-                "path_or_hf_repo": LOCAL_MODEL_ID,
+                "path_or_hf_repo": self._model_id,
                 "language": WHISPER_LANGUAGE,
                 "temperature": 0.0,
             }
@@ -64,4 +86,4 @@ class LocalTranscriber:
 
     @property
     def model_id(self) -> str:
-        return LOCAL_MODEL_ID
+        return self._model_id

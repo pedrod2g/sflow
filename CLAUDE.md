@@ -38,23 +38,41 @@ bash build.sh
 `install.sh` exists because `build.sh` alone leaves you with a broken paste —
 see "Critical: ad-hoc rebuild → silent Accessibility revocation" below.
 
-The .app bundle is self-contained (~118MB, parakeet/mlx-whisper excluded).
-No Python, no venv, no terminal needed. On first launch, if no API key exists
-in `~/Library/Application Support/SFlow/.env`, a dialog asks for it. The app
-lives in the menu bar (no Dock icon).
+The .app bundle is self-contained (~478MB — INCLUYE el stack MLX: mlx-whisper +
+parakeet-mlx + librosa/numba/scipy + los Metal .metallib). No Python, no venv,
+no terminal. On first launch, if no API key exists in
+`~/Library/Application Support/SFlow/.env`, a dialog asks for it. Menu-bar app.
 
-### Local backend (opt-in, Apple Silicon)
-```bash
-source venv/bin/activate
-pip install mlx-whisper
-# Hub → Ajustes → Backend → mlx-whisper
-```
-First transcription downloads the model (~244MB for `whisper-small-mlx`).
+### Modelos de transcripción SELECCIONABLES (v2.6, 12-jul-2026)
+Catálogo en `config.py` → `STT_MODELS` (3), elegible en Hub → Ajustes → "Modelo":
+1. **whisper-turbo-local** (`mlx-community/whisper-large-v3-turbo`) — DEFAULT. Mejor
+   precisión es (WER 2.9%), offline, usa el diccionario personal. ~950ms warm en M4.
+2. **parakeet-v3** (`mlx-community/parakeet-tdt-0.6b-v3`, motor de Handy) — el más
+   rápido (~280ms), pierde en nombres propios, NO usa diccionario.
+3. **groq-turbo** — nube, fallback. Router (`core/transcriber.py`) cae a Groq si el
+   motor local no está disponible en runtime.
+Setting: `stt_model` (migra del legacy `transcribe_backend`). El modelo local activo
+se **warm-loadea en background al arrancar** (`Transcriber.warm_active()` en main.py).
+Los modelos se descargan a `~/.cache/huggingface` en el primer uso (~1.6GB turbo, ~600MB parakeet).
 
-### Build Requirements
-- Python 3.12+ with venv
-- PyInstaller (installed automatically by build.sh)
-- portaudio (`brew install portaudio`)
+### Build Requirements (CRÍTICO)
+- **Python 3.12** (NO 3.14 — MLX no instala ahí). El venv DEBE ser 3.12: `python3.12 -m venv venv`.
+- `pip install -r requirements.txt` ya incluye mlx-whisper + parakeet-mlx.
+- PyInstaller (auto por build.sh) · portaudio (`brew install portaudio`)
+
+### Gotchas del bundle MLX (aprendidos 12-jul-2026)
+- **`multiprocessing.freeze_support()` OBLIGATORIO** al inicio de main.py. numba/librosa
+  lanzan procesos con start-method "spawn" que re-ejecutan el binario; sin freeze_support
+  cada worker cae en `main()` y ABRE OTRA PILL (la app se multiplica al dictar con modelo local).
+- **NO excluir `unittest`/`test`** en sflow.spec — numba los importa en runtime; excluirlos
+  rompe AMBOS motores locales (whisper cae a Groq, parakeet tira ModuleNotFoundError).
+- **torch/torchaudio SÍ se excluyen** (dep transitiva de mlx-whisper que el path MLX no usa;
+  ahorra ~2GB). Verificado: ningún motor importa torch en runtime.
+- **`collect_all('mlx')`** trae el `mlx.metallib` (shaders Metal) — sin él MLX no corre en el bundle.
+- **Race `rm: dist: Directory not empty`** en build.sh: lo causaba `open dist/` (Finder + mds).
+  Ya se quitó. Si reaparece, pre-limpia con retry loop antes de buildear.
+- **Selftest:** `SFlow --selftest-stt` (o `python main.py --selftest-stt`) prueba los motores
+  locales dentro del binario (frozen o dev) e imprime PASS/FAIL. Úsalo para validar cada rebuild.
 
 ## macOS Permissions Required
 
@@ -63,6 +81,11 @@ First transcription downloads the model (~244MB for `whisper-small-mlx`).
 - **Input Monitoring**: May be required for pynput — add your Terminal/IDE
 
 ## Benchmark: local model selection (M-series, Spanish voice, real samples)
+
+> ⚠️ SUPERSEDED 12-jul-2026 (M4, mlx 0.32, voz real es, warm mediana de 3): la tabla de
+> abajo (mlx viejo) daba turbo en ~4.7s = FALSO hoy. Números frescos:
+> **whisper-large-v3-turbo ~950ms (WER 2.9%, mejor)** · **parakeet-v3 ~280ms (WER 4.3%, más rápido)** ·
+> groq ~1.4-2.7s. Por eso el default cambió a whisper-large-v3-turbo local (antes whisper-small).
 
 | Model | short 3s | medium 10s | long 30s | Notes |
 |---|---|---|---|---|

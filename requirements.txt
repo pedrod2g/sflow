@@ -8,8 +8,10 @@ flask>=3.0.0
 pyobjc-framework-Cocoa>=10.0
 pyobjc-framework-Quartz>=10.0
 
-# --- Optional: local offline transcription (Apple Silicon only) ---
-# Benchmark winner for Spanish voice: mlx-whisper small (244MB, 1s/10s audio).
-# Install manually:
-#   pip install mlx-whisper
-# Then Hub → Ajustes → Backend → Local.
+# --- Local offline transcription (Apple Silicon / Apple MLX) ---
+# Se BUNDLEAN en el .app (ver sflow.spec) para que los modelos locales funcionen
+# sin instalacion manual. En Intel Mac fallan al importar y el router cae a Groq.
+# Benchmark M4 (voz real es, 12-jul-2026): whisper-large-v3-turbo ~950ms/WER 2.9%
+# (mejor precision) · parakeet v3 ~280ms (mas rapido). Ambos seleccionables en Ajustes.
+mlx-whisper>=0.4.0
+parakeet-mlx>=0.3.0

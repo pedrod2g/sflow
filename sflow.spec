@@ -26,6 +26,20 @@ sounddevice_datas = collect_data_files('_sounddevice_data')
 # --- Collect pynput backends ---
 pynput_hidden = collect_submodules('pynput')
 
+# --- Collect local STT stack (mlx-whisper + parakeet-mlx) ---
+# Bundlea MLX (incl. los Metal .metallib), pesos-loaders y tokenizers para que
+# los modelos locales corran DENTRO del .app. Si algun paquete no esta instalado
+# (p.ej. build en Intel), se omite y el runtime cae a Groq.
+mlx_datas, mlx_binaries, mlx_hidden = [], [], []
+for pkg in ['mlx', 'mlx_whisper', 'parakeet_mlx', 'huggingface_hub', 'tiktoken', 'tiktoken_ext']:
+    try:
+        d, b, h = collect_all(pkg)
+        mlx_datas += d
+        mlx_binaries += b
+        mlx_hidden += h
+    except Exception:
+        pass
+
 # --- Data files ---
 datas = [
     ('logo_small.png', '.'),
@@ -33,11 +47,12 @@ datas = [
 ]
 datas += sounddevice_datas
 datas += pyobjc_datas
+datas += mlx_datas
 
 a = Analysis(
     ['main.py'],
     pathex=[],
-    binaries=pyobjc_binaries,
+    binaries=pyobjc_binaries + mlx_binaries,
     datas=datas,
     hiddenimports=[
         # PyObjC
@@ -88,39 +103,30 @@ a = Analysis(
         'ui.audio_visualizer',
         'ui.settings_dialog',
         'ui.red_dot_indicator',
+        'core.transcriber_parakeet',
+        # Local STT stack (auto-descubierto por collect_all arriba)
+        *mlx_hidden,
     ],
     hookspath=[],
     hooksconfig={},
     runtime_hooks=[],
     excludes=[
         'tkinter',
-        'unittest',
-        'test',
-        # Local transcription stack — opt-in via pip install mlx-whisper.
-        # Excluded from bundle to keep it small. LocalTranscriber detects availability at runtime.
-        'mlx_whisper',
-        'parakeet_mlx',
-        'mlx',
-        'mlx.core',
-        'mlx_metal',
-        'librosa',
-        'numba',
-        'llvmlite',
-        'scipy',
+        # NOTA: 'unittest'/'test' NO se excluyen — numba (dep de mlx-whisper y de
+        # librosa/parakeet) los importa en runtime; excluirlos rompe ambos motores.
+        # NOTA: el stack MLX (mlx, mlx_whisper, parakeet_mlx, librosa, numba, scipy,
+        # soundfile, soxr, audioread, pooch, tiktoken, regex, llvmlite) YA NO se
+        # excluye: se bundlea via collect_all (arriba) para que los modelos locales
+        # corran dentro del .app. Verificado 12-jul-2026: ninguno importa torch en
+        # runtime, asi que torch/torchaudio siguen fuera (ahorra ~2GB).
         'sklearn',
         'scikit-learn',
-        'soundfile',
-        'soxr',
-        'pooch',
-        'audioread',
         'pandas',
         'matplotlib',
         'torch',
         'torchaudio',
-        'tiktoken',
         'sympy',
         'networkx',
-        'regex',
         'moonshine',
         'moonshine_voice',
     ],

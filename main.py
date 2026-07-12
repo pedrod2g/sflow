@@ -8,6 +8,14 @@ import signal
 import subprocess
 import threading
 import traceback
+import multiprocessing
+
+# CRITICO en un .app congelado (PyInstaller): numba/librosa (motores locales)
+# lanzan procesos con multiprocessing (start method "spawn" en macOS), que
+# re-ejecutan el binario. Sin freeze_support(), cada worker cae en main() y
+# ABRE OTRA VENTANA (pill). freeze_support() intercepta al worker y lo hace
+# salir antes de llegar a main(). Debe ser lo PRIMERO que corre.
+multiprocessing.freeze_support()
 from PyQt6.QtWidgets import (
     QApplication, QSystemTrayIcon, QMenu,
     QDialog, QVBoxLayout, QLabel, QLineEdit, QPushButton, QMessageBox,
@@ -213,6 +221,9 @@ class SFlowApp(QObject):
         super().__init__()
         self.recorder = AudioRecorder()
         self.transcriber = Transcriber()
+        # Warm-load del modelo local activo en background: deja el modelo residente
+        # para que el PRIMER dictado ya salga en latencia warm (no cold-start).
+        threading.Thread(target=self.transcriber.warm_active, daemon=True).start()
         self.groq_raw = GroqTranscriber()  # raw STT for command mode (no LLM cleanup)
         self.command = CommandModeHandler()
         self.transform = TransformHandler()
@@ -450,8 +461,55 @@ def _install_safe_excepthook():
         pass
 
 
+def _selftest_stt():
+    """Prueba los motores STT DENTRO del binario (frozen o dev). Sin GUI.
+    Uso: SFlow --selftest-stt   ó   python main.py --selftest-stt
+    Genera un tono en memoria y corre cada motor local; imprime PASS/FAIL."""
+    import io, wave, time
+    import numpy as np
+    from config import STT_MODELS, set_setting, get_setting
+    from core.transcriber import Transcriber
+    _orig_model = get_setting("stt_model", "whisper-turbo-local")
+    sr = 16000
+    t = np.linspace(0, 1.2, int(sr * 1.2), False)
+    tone = (0.1 * np.sin(2 * np.pi * 200 * t) * 32767).astype("int16")
+    def wav():
+        b = io.BytesIO()
+        with wave.open(b, "wb") as w:
+            w.setnchannels(1); w.setsampwidth(2); w.setframerate(sr); w.writeframes(tone.tobytes())
+        b.seek(0); return b
+    frozen = getattr(sys, "frozen", False)
+    print(f"[selftest] frozen={frozen}")
+    # Diagnostico: disponibilidad real de cada motor local (import de MLX)
+    from core.transcriber_local import LocalTranscriber
+    from core.transcriber_parakeet import ParakeetTranscriber
+    _wl = LocalTranscriber(); _pk = ParakeetTranscriber()
+    print(f"[selftest] whisper available={_wl.available} err={getattr(_wl,'_import_error',None)}")
+    print(f"[selftest] parakeet available={_pk.available} err={getattr(_pk,'_import_error',None)}")
+    ok = True
+    for m in STT_MODELS:
+        if not m["local"]:
+            continue
+        set_setting("stt_model", m["id"])
+        tr = Transcriber()
+        try:
+            t0 = time.perf_counter(); tr.warm_active(); warm = time.perf_counter() - t0
+            t0 = time.perf_counter(); _txt, mid = tr.transcribe(wav()); lat = time.perf_counter() - t0
+            print(f"[selftest] {m['id']:20} PASS  load={warm:.1f}s infer={lat*1000:.0f}ms model={mid}")
+        except Exception as e:
+            ok = False
+            print(f"[selftest] {m['id']:20} FAIL  {type(e).__name__}: {e}")
+    set_setting("stt_model", _orig_model)  # restaura el ajuste real del usuario
+    print("[selftest] RESULT:", "ALL_PASS" if ok else "SOME_FAIL")
+    sys.exit(0 if ok else 1)
+
+
 def main():
     _install_safe_excepthook()
+
+    if "--selftest-stt" in sys.argv:
+        _selftest_stt()
+        return
 
     app = QApplication(sys.argv)
     app.setApplicationName("SFlow")
