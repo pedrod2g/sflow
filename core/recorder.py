@@ -64,6 +64,20 @@ class AudioRecorder:
         buf.seek(0)
         return buf
 
+    def save_wav_to(self, path: str) -> str | None:
+        """Write the current recording to disk at `path`. Returns path on success."""
+        if not self.frames:
+            return None
+        audio_data = np.concatenate(self.frames, axis=0)
+        import os
+        os.makedirs(os.path.dirname(path), exist_ok=True)
+        with wave.open(path, "wb") as wf:
+            wf.setnchannels(CHANNELS)
+            wf.setsampwidth(2)
+            wf.setframerate(SAMPLE_RATE)
+            wf.writeframes(audio_data.tobytes())
+        return path
+
     def get_duration(self) -> float:
         if not self.frames:
             return 0.0

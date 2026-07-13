@@ -1,3 +1,4 @@
+import sys
 import math
 import ctypes
 import win32con
@@ -15,6 +16,7 @@ from config import (
     PILL_MARGIN_BOTTOM,
     LOGO_SIZE,
     LOGO_PATH,
+    get_setting,
 )
 
 
@@ -88,16 +90,83 @@ class PillWidget(QWidget):
             self.move(x, y)
 
     def _setup_native_macos(self):
-        """Configure native Windows window to float above everything without stealing focus."""
-        hwnd = int(self.winId())
-        
-        # Get current extended window style
-        ex_style = ctypes.windll.user32.GetWindowLongW(hwnd, win32con.GWL_EXSTYLE)
-        
-        # Add tool window (hides from taskbar/alt-tab), topmost, and no activate (prevent focus stealing)
-        new_ex_style = ex_style | win32con.WS_EX_TOOLWINDOW | win32con.WS_EX_TOPMOST | win32con.WS_EX_NOACTIVATE
-        
-        ctypes.windll.user32.SetWindowLongW(hwnd, win32con.GWL_EXSTYLE, new_ex_style)
+        if sys.platform == "win32":
+            """Configure native Windows window to float above everything without stealing focus."""
+            hwnd = int(self.winId())
+            
+            # Get current extended window style
+            ex_style = ctypes.windll.user32.GetWindowLongW(hwnd, win32con.GWL_EXSTYLE)
+            
+            # Add tool window (hides from taskbar/alt-tab), topmost, and no activate (prevent focus stealing)
+            new_ex_style = ex_style | win32con.WS_EX_TOOLWINDOW | win32con.WS_EX_TOPMOST | win32con.WS_EX_NOACTIVATE
+            
+            ctypes.windll.user32.SetWindowLongW(hwnd, win32con.GWL_EXSTYLE, new_ex_style)
+        else:
+            """Configure native macOS window to float above everything without stealing focus."""
+            import objc
+            from ctypes import c_void_p
+            import AppKit
+            ns_view = objc.objc_object(c_void_p=c_void_p(self.winId().__int__()))
+            ns_window = ns_view.window()
+            ns_window.setLevel_(AppKit.NSFloatingWindowLevel)
+            ns_window.setStyleMask_(ns_window.styleMask() | AppKit.NSWindowStyleMaskNonactivatingPanel)
+            ns_window.setHidesOnDeactivate_(False)
+            ns_window.setCollectionBehavior_(
+                AppKit.NSWindowCollectionBehaviorCanJoinAllSpaces
+                | AppKit.NSWindowCollectionBehaviorStationary
+                | AppKit.NSWindowCollectionBehaviorFullScreenAuxiliary
+            )
+
+            # Liquid Glass — opt-in, safe-by-default. On failure, pill stays fully
+            # opaque (never leaves the user with an invisible window).
+            if get_setting("liquid_glass_enabled", False):
+                installed = self._try_install_visual_effect(ns_window)
+                if installed:
+                    # Only drop our alpha AFTER confirming the material is live
+                    self._bg_color = QColor(15, 15, 15, 50)
+
+        # Liquid Glass — opt-in, safe-by-default. On failure, pill stays fully
+        # opaque (never leaves the user with an invisible window).
+        if get_setting("liquid_glass_enabled", False):
+            installed = self._try_install_visual_effect(ns_window)
+            if installed:
+                # Only drop our alpha AFTER confirming the material is live
+                self._bg_color = QColor(15, 15, 15, 50)
+
+    def _try_install_visual_effect(self, ns_window) -> bool:
+        """Attach NSVisualEffectView under the Qt content. Returns True on success."""
+        try:
+            content_view = ns_window.contentView()
+            if content_view is None:
+                return False
+            bounds = content_view.bounds()
+            effect = AppKit.NSVisualEffectView.alloc().initWithFrame_(bounds)
+            effect.setAutoresizingMask_(
+                AppKit.NSViewWidthSizable | AppKit.NSViewHeightSizable
+            )
+            try:
+                effect.setMaterial_(AppKit.NSVisualEffectMaterialHUDWindow)
+            except Exception:
+                effect.setMaterial_(AppKit.NSVisualEffectMaterialDark)
+            effect.setBlendingMode_(AppKit.NSVisualEffectBlendingModeBehindWindow)
+            effect.setState_(AppKit.NSVisualEffectStateActive)
+            try:
+                effect.setWantsLayer_(True)
+                layer = effect.layer()
+                if layer is not None:
+                    layer.setCornerRadius_(float(PILL_CORNER_RADIUS))
+                    layer.setMasksToBounds_(True)
+            except Exception:
+                pass
+            ns_window.setOpaque_(False)
+            ns_window.setBackgroundColor_(AppKit.NSColor.clearColor())
+            content_view.addSubview_positioned_relativeTo_(
+                effect, AppKit.NSWindowBelow, None
+            )
+            return True
+        except Exception as e:
+            print(f"Liquid Glass unavailable: {e}")
+            return False
 
     def showEvent(self, event):
         """Called when the widget is first shown. Sets up native macOS properties."""

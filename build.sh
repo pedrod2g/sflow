@@ -55,5 +55,5 @@ echo ""
 echo "  IMPORTANTE: Usar 'ditto' (no 'cp -r') para preservar metadata del bundle."
 echo ""
 
-# Open dist folder
-open dist/
+# Nota: NO hacemos `open dist/` — deja una ventana de Finder abierta que crea
+# .DS_Store y hace fallar el `rm -rf dist/` del siguiente build (Directory not empty).

@@ -1,5 +1,7 @@
 .env
 transcriptions.db
+dictionary.txt
+settings.json
 __pycache__/
 *.pyc
 .DS_Store
@@ -15,3 +17,4 @@ start_sflow.sh
 logo-v*.png
 logo-*-clean.png
 *.iconset/
+PROMPT-RUST.md

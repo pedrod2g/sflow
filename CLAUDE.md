@@ -28,24 +28,51 @@ python3 main.py
 ## Build Desktop App (.app bundle)
 
 ```bash
-# Build SFlow.app (generates icns, builds with PyInstaller, signs ad-hoc)
+# Recommended: full install dance (build + ditto + kill old proc + relaunch + open Accessibility panel)
+bash install.sh
+
+# Or just build the bundle without installing
 bash build.sh
-
-# Install to Applications (MUST use ditto, not cp -r)
-ditto dist/SFlow.app /Applications/SFlow.app
-
-# Remove quarantine if needed
-xattr -cr /Applications/SFlow.app
 ```
 
-The .app bundle is self-contained (~107MB). No Python, no venv, no terminal needed.
-On first launch, if no API key exists in `~/Library/Application Support/SFlow/.env`,
-a dialog asks for it. The app lives in the menu bar (no Dock icon).
+`install.sh` exists because `build.sh` alone leaves you with a broken paste —
+see "Critical: ad-hoc rebuild → silent Accessibility revocation" below.
 
-### Build Requirements
-- Python 3.12+ with venv
-- PyInstaller (installed automatically by build.sh)
-- portaudio (`brew install portaudio`)
+The .app bundle is self-contained (~478MB — INCLUYE el stack MLX: mlx-whisper +
+parakeet-mlx + librosa/numba/scipy + los Metal .metallib). No Python, no venv,
+no terminal. On first launch, if no API key exists in
+`~/Library/Application Support/SFlow/.env`, a dialog asks for it. Menu-bar app.
+
+### Modelos de transcripción SELECCIONABLES (v2.6, 12-jul-2026)
+Catálogo en `config.py` → `STT_MODELS` (3), elegible en Hub → Ajustes → "Modelo":
+1. **whisper-turbo-local** (`mlx-community/whisper-large-v3-turbo`) — DEFAULT. Mejor
+   precisión es (WER 2.9%), offline, usa el diccionario personal. ~950ms warm en M4.
+2. **parakeet-v3** (`mlx-community/parakeet-tdt-0.6b-v3`, motor de Handy) — el más
+   rápido (~280ms), pierde en nombres propios, NO usa diccionario.
+3. **groq-turbo** — nube, fallback. Router (`core/transcriber.py`) cae a Groq si el
+   motor local no está disponible en runtime.
+Setting: `stt_model` (migra del legacy `transcribe_backend`). El modelo local activo
+se **warm-loadea en background al arrancar** (`Transcriber.warm_active()` en main.py).
+Los modelos se descargan a `~/.cache/huggingface` en el primer uso (~1.6GB turbo, ~600MB parakeet).
+
+### Build Requirements (CRÍTICO)
+- **Python 3.12** (NO 3.14 — MLX no instala ahí). El venv DEBE ser 3.12: `python3.12 -m venv venv`.
+- `pip install -r requirements.txt` ya incluye mlx-whisper + parakeet-mlx.
+- PyInstaller (auto por build.sh) · portaudio (`brew install portaudio`)
+
+### Gotchas del bundle MLX (aprendidos 12-jul-2026)
+- **`multiprocessing.freeze_support()` OBLIGATORIO** al inicio de main.py. numba/librosa
+  lanzan procesos con start-method "spawn" que re-ejecutan el binario; sin freeze_support
+  cada worker cae en `main()` y ABRE OTRA PILL (la app se multiplica al dictar con modelo local).
+- **NO excluir `unittest`/`test`** en sflow.spec — numba los importa en runtime; excluirlos
+  rompe AMBOS motores locales (whisper cae a Groq, parakeet tira ModuleNotFoundError).
+- **torch/torchaudio SÍ se excluyen** (dep transitiva de mlx-whisper que el path MLX no usa;
+  ahorra ~2GB). Verificado: ningún motor importa torch en runtime.
+- **`collect_all('mlx')`** trae el `mlx.metallib` (shaders Metal) — sin él MLX no corre en el bundle.
+- **Race `rm: dist: Directory not empty`** en build.sh: lo causaba `open dist/` (Finder + mds).
+  Ya se quitó. Si reaparece, pre-limpia con retry loop antes de buildear.
+- **Selftest:** `SFlow --selftest-stt` (o `python main.py --selftest-stt`) prueba los motores
+  locales dentro del binario (frozen o dev) e imprime PASS/FAIL. Úsalo para validar cada rebuild.
 
 ## macOS Permissions Required
 
@@ -53,48 +80,103 @@ a dialog asks for it. The app lives in the menu bar (no Dock icon).
 - **Microphone**: Automatically requested on first use
 - **Input Monitoring**: May be required for pynput — add your Terminal/IDE
 
-## Project Structure
+## Benchmark: local model selection (M-series, Spanish voice, real samples)
+
+> ⚠️ SUPERSEDED 12-jul-2026 (M4, mlx 0.32, voz real es, warm mediana de 3): la tabla de
+> abajo (mlx viejo) daba turbo en ~4.7s = FALSO hoy. Números frescos:
+> **whisper-large-v3-turbo ~950ms (WER 2.9%, mejor)** · **parakeet-v3 ~280ms (WER 4.3%, más rápido)** ·
+> groq ~1.4-2.7s. Por eso el default cambió a whisper-large-v3-turbo local (antes whisper-small).
+
+| Model | short 3s | medium 10s | long 30s | Notes |
+|---|---|---|---|---|
+| whisper-tiny-mlx | 0.31s 🥇 | 3.13s | 10.91s | fastest for short clips, weaker punctuation |
+| whisper-base-mlx | 2.57s | 5.09s | 6.34s | ok |
+| **whisper-small-mlx** | 1.11s | **1.05s** 🥇 | **3.92s** 🥇 | **default** — best overall |
+| whisper-large-v3-turbo | 4.68s | 5.11s | 10.70s | slower than cloud Groq |
+| parakeet-tdt-0.6b-v3 | 2.87s | 4.21s | 7.70s | promising but slow in practice |
+| faster-whisper (CT2) | — | — | — | not tested: poor on ARM |
+
+Bench script: `/tmp/sflow_bench/bench.py` (generates voice via `say -v Paulina`,
+16kHz mono WAV, warms up each model, records hot inference time).
+
+## Project Structure (v2.5 — with Hub + CGEvent paste + benchmarked local)
 
 ```
 sflow/
-├── main.py                 # Entry point — tray icon, first-run dialog, launch-at-login, app controller
-├── config.py               # All configuration constants (UI, audio, paths, bundle detection)
-├── sflow.spec              # PyInstaller spec for building .app bundle
-├── build.sh                # One-shot build script (icns → PyInstaller → sign)
+├── main.py                      # Tray + controller (regular + command-mode flows)
+├── config.py                    # Constants + runtime settings (settings.json)
+├── sflow.spec                   # PyInstaller spec
+├── build.sh                     # icns → PyInstaller → sign
 ├── ui/
-│   ├── pill_widget.py      # Floating pill overlay (native macOS via PyObjC)
-│   └── audio_visualizer.py # Real-time audio bars
+│   ├── pill_widget.py           # NSPanel + Liquid Glass (NSVisualEffectView)
+│   ├── audio_visualizer.py      # FFT + spring physics 60Hz
+│   └── settings_dialog.py       # QDialog for all toggles
 ├── core/
-│   ├── recorder.py         # sounddevice audio capture
-│   ├── transcriber.py      # Groq Whisper API client (lazy init, 10s timeout)
-│   ├── hotkey.py           # Global hotkeys (Ctrl+Shift hold + double-tap Ctrl)
-│   └── clipboard.py        # Focus save/restore + native paste via AppleScript
-├── db/
-│   └── database.py         # SQLite CRUD
-├── web/
-│   └── server.py           # Flask dashboard at localhost:5678 (auto-finds free port)
-├── logo.png                # Brand logo (full size, used for .icns generation)
-├── logo_small.png          # Brand logo (22x22 for menu bar + pill)
-├── SFlow.icns              # macOS app icon (generated from logo.png)
-├── requirements.txt
-├── .env                    # GROQ_API_KEY (never committed)
-└── .env.example
+│   ├── recorder.py              # sounddevice capture
+│   ├── transcriber.py           # Router (backend → commands → LLM cleanup)
+│   ├── transcriber_groq.py      # Groq Whisper Large v3 Turbo
+│   ├── transcriber_local.py     # parakeet-mlx (optional, offline, Apple Silicon)
+│   ├── llm_cleanup.py           # Groq Llama 3.1 8B instant — filler removal + tone
+│   ├── context.py               # NSWorkspace frontmost app → tone profile
+│   ├── dictionary.py            # Personal vocab → Whisper prompt hint
+│   ├── smart_commands.py        # "nueva línea" → \n, "coma" → ", ", etc.
+│   ├── command_mode.py          # Select+speak+LLM transform flow
+│   ├── hotkey.py                # 4 modes (hold, double-tap, command, mouse)
+│   └── clipboard.py             # Focus save/restore + streaming paste
+├── db/database.py               # SQLite history (model column tracks backend used)
+├── web/server.py                # Flask dashboard localhost:5678
+└── ~/Library/Application Support/SFlow/
+    ├── .env                     # GROQ_API_KEY
+    ├── settings.json            # User toggles (generated on save)
+    ├── dictionary.txt           # Personal vocabulary (one term per line)
+    └── transcriptions.db        # History
 ```
 
-## Architecture & Data Flow
+## Hotkeys (v2.5)
 
+| Combo | Mode |
+|---|---|
+| Ctrl+Alt hold | Regular recording |
+| Double-tap Ctrl, tap again to stop | Hands-free |
+| Ctrl+Shift hold | **Command Mode** — transforms selected text via LLM |
+| Mouse button (middle/Mouse4/Mouse5) | Regular recording (opt-in, Settings) |
+| Cmd+Shift+H | Open Hub (history + dictionary + settings) |
+| Cmd+Ctrl+V | Paste Last Transcript (Wispr Flow convention) |
+| Trailing "press enter" / "dale enter" | Auto-press Enter after paste |
+
+## Architecture & Data Flow (v2)
+
+### Regular transcription
 ```
 Hotkey Press (pynput thread)
   → [QueuedConnection] → save_frontmost_app() + recorder.start()
-  → pill.set_state(RECORDING)
-  → sounddevice callback → queue.Queue → QTimer → audio_visualizer paints bars
+  → pill.set_state(RECORDING) → FFT visualizer at 60fps
 
-Hotkey Release (pynput thread)
+Hotkey Release
   → [QueuedConnection] → recorder.stop()
   → pill.set_state(PROCESSING)
-  → background Thread: transcriber.transcribe(wav_buffer)
-    → Groq Whisper API returns text
-    → [QueuedConnection] → paste_text() + db.insert() + pill.set_state(DONE)
+  → background Thread: Transcriber.transcribe(wav)
+      → backend = GroqTranscriber OR LocalTranscriber (setting-driven)
+      → vocabulary = dictionary.as_whisper_prompt()  (Whisper `prompt=` hint)
+      → raw = backend.transcribe(wav, vocabulary)
+      → raw = smart_commands.apply(raw)              (regex pass)
+      → tone = context.tone_for_active_app()
+      → final = llm_cleanup.clean(raw, tone)         (Llama 3.1 8B instant, ~150ms)
+      → (final, model_id)
+  → [QueuedConnection] → paste_text() + db.insert(model=model_id) + DONE
+```
+
+### Command Mode
+```
+Ctrl+Shift Press
+  → save_frontmost_app() + copy_selection() (Cmd+C → clipboard diff)
+  → recorder.start() + pill.RECORDING
+
+Release
+  → recorder.stop() + PROCESSING
+  → GroqTranscriber (raw STT, no cleanup) → voice_command
+  → CommandModeHandler.transform(voice, selection) → Llama transforms text
+  → paste_text(result) → replaces selection
 ```
 
 ## Critical Implementation Details
@@ -155,6 +237,40 @@ Default port is 5678 (not 5000 which conflicts with AirPlay on macOS 12+). Auto-
 - The .icns is auto-generated from logo.png by build.sh if missing
 - Ad-hoc signing (`codesign --force --deep --sign -`) is sufficient for personal use
 - Remove quarantine after install: `xattr -cr /Applications/SFlow.app`
+
+### 10. Critical: ad-hoc rebuild → silent Accessibility revocation
+
+**Symptom:** After `ditto` of a rebuilt bundle, dictation works (transcription
+saves to DB, log shows `paste ok`) but the text never appears in the target
+app. Keystrokes are being blocked by the OS silently.
+
+**Root cause:** Each `pyinstaller` run produces a new binary hash. Ad-hoc
+signatures change per-build. macOS's TCC database tracks Accessibility
+permission by binary hash → it silently revokes trust when the hash changes.
+CGEventPost succeeds (no error) but the OS drops the event before it reaches
+other apps. The running process (if any) also keeps executing the old
+in-memory code while its on-disk binary mismatches, compounding confusion.
+
+**Fix (operational):**
+1. Use `install.sh`, NOT `build.sh` + manual `ditto`. It:
+   - Builds + dittos
+   - Kills any running SFlow (`pgrep -f /Applications/SFlow.app`)
+   - Launches fresh instance via `open -n`
+   - Opens System Settings → Privacy & Security → Accessibility
+2. In the Accessibility panel: remove SFlow (-), add it back (+) pointing at
+   /Applications/SFlow.app. Repeat in Input Monitoring.
+3. Confirm with a short dictation — text should appear in the frontmost app.
+
+**Fix (permanent, $99/yr):** Enroll in Apple Developer Program and sign with
+a Developer ID certificate. Persistent team identifier → TCC preserves trust
+across rebuilds. Not worth it for personal use; accept the manual re-approve.
+
+**Detection in code:** `main._ensure_accessibility()` catches this at startup
+via `AXIsProcessTrustedWithOptions` and auto-opens the Privacy panel plus a
+QMessageBox explaining the fix. This covers the "user rebuilt and the new
+process can't paste" case, but NOT the "old process still running with now-
+invalidated binary" case — that one requires killing the process, which is
+what `install.sh` does.
 
 ## Customization
 
