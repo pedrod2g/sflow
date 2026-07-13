@@ -5,12 +5,22 @@ A pulsing red square in the top-right corner reminds the user that the
 microphone is still capturing — useful because hands-free has no key held
 to give tactile feedback like Ctrl+Alt does.
 """
-from ctypes import c_void_p
-import AppKit
-import objc
+import sys
+import math
 from PyQt6.QtWidgets import QWidget, QApplication
 from PyQt6.QtCore import Qt, QTimer
 from PyQt6.QtGui import QPainter, QColor
+
+if sys.platform == "win32":
+    import ctypes
+    import win32con
+else:
+    from ctypes import c_void_p
+    try:
+        import AppKit
+        import objc
+    except ImportError:
+        pass
 
 
 DOT_SIZE = 18
@@ -52,18 +62,24 @@ class RedDotIndicator(QWidget):
             self.move(x, y)
 
     def _setup_native_macos(self):
-        ns_view = objc.objc_object(c_void_p=c_void_p(self.winId().__int__()))
-        ns_window = ns_view.window()
-        ns_window.setLevel_(AppKit.NSFloatingWindowLevel)
-        ns_window.setStyleMask_(
-            ns_window.styleMask() | AppKit.NSWindowStyleMaskNonactivatingPanel
-        )
-        ns_window.setHidesOnDeactivate_(False)
-        ns_window.setCollectionBehavior_(
-            AppKit.NSWindowCollectionBehaviorCanJoinAllSpaces
-            | AppKit.NSWindowCollectionBehaviorStationary
-            | AppKit.NSWindowCollectionBehaviorFullScreenAuxiliary
-        )
+        if sys.platform == "win32":
+            hwnd = int(self.winId())
+            ex_style = ctypes.windll.user32.GetWindowLongW(hwnd, win32con.GWL_EXSTYLE)
+            new_ex_style = ex_style | win32con.WS_EX_TOOLWINDOW | win32con.WS_EX_TOPMOST | win32con.WS_EX_NOACTIVATE
+            ctypes.windll.user32.SetWindowLongW(hwnd, win32con.GWL_EXSTYLE, new_ex_style)
+        else:
+            ns_view = objc.objc_object(c_void_p=c_void_p(self.winId().__int__()))
+            ns_window = ns_view.window()
+            ns_window.setLevel_(AppKit.NSFloatingWindowLevel)
+            ns_window.setStyleMask_(
+                ns_window.styleMask() | AppKit.NSWindowStyleMaskNonactivatingPanel
+            )
+            ns_window.setHidesOnDeactivate_(False)
+            ns_window.setCollectionBehavior_(
+                AppKit.NSWindowCollectionBehaviorCanJoinAllSpaces
+                | AppKit.NSWindowCollectionBehaviorStationary
+                | AppKit.NSWindowCollectionBehaviorFullScreenAuxiliary
+            )
 
     def showEvent(self, event):
         super().showEvent(event)
@@ -86,7 +102,6 @@ class RedDotIndicator(QWidget):
     def _animate_pulse(self):
         self._pulse_t = (self._pulse_t + PULSE_INTERVAL_MS) % PULSE_PERIOD_MS
         # Smooth in/out: 130..255 alpha
-        import math
         phase = (self._pulse_t / PULSE_PERIOD_MS) * 2 * math.pi
         norm = (math.sin(phase) + 1) / 2  # 0..1
         self._alpha = int(130 + norm * 125)
