@@ -68,3 +68,28 @@ For SFlow to perform transcription and AI Refinement, it requires a free API key
 5. Add any extra information in the **Campo de contextualización** (e.g., _Desarrollo de CRM en Python_).
 6. Click **Guardar**.
 7. Start dictating! The messy transcript will be cleaned and reformatted by the LLM before pasting.
+
+## Troubleshooting: Hotkeys (Ctrl+Alt hold / double-tap Ctrl) not working
+
+If the pill doesn't appear and nothing happens when you press the hotkeys, this
+is almost always a **privilege mismatch**. Windows (UIPI) silently blocks a
+keyboard hook from a lower-privilege process from seeing keystrokes while a
+higher-privilege (Run as Administrator) window has focus — no error, no
+crash, the keys are just dropped.
+
+**How to confirm:** check `%LOCALAPPDATA%\SFlow\hotkey.log`. If it only shows
+`HotkeyListener.start() called` / `keyboard.Listener started` and never logs
+any key press/tap events no matter how much you type, the hook isn't
+receiving input at all (this rules out a double-tap timing issue).
+
+**Fix:**
+1. Close SFlow (right-click tray icon → Quit, or End Task in Task Manager).
+2. Relaunch `SFlow.exe` with **Run as administrator** (right-click → Run as
+   administrator), so it matches the privilege level of whatever elevated
+   windows you use.
+3. Try the hotkey again in the app you want to dictate into.
+
+If you don't run any elevated apps/terminals, SFlow doesn't need to be
+elevated either — the mismatch only breaks things when the *focused* window
+has higher privileges than SFlow.
+
