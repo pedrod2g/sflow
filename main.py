@@ -3,38 +3,70 @@
 
 import os
 import sys
-import signal
-import subprocess
-import threading
-from PyQt6.QtWidgets import (
-    QApplication, QSystemTrayIcon, QMenu,
-    QDialog, QVBoxLayout, QLabel, QLineEdit, QPushButton, QMessageBox,
-)
-from PyQt6.QtCore import Qt, QObject, pyqtSignal, pyqtSlot
-from PyQt6.QtGui import QIcon, QPixmap, QAction
+import traceback
 
-from ui.pill_widget import PillWidget
-from core.recorder import AudioRecorder
-from core.transcriber import Transcriber
-from core.hotkey import HotkeyListener
-from core.clipboard import paste_text, save_frontmost_app
-from db.database import TranscriptionDB
-from web.server import start_web_server
-from config import LOGO_PATH, APP_DATA_DIR, GROQ_API_KEY
+# Hide console window immediately on Windows if frozen
+if sys.platform == "win32" and getattr(sys, "frozen", False):
+    import ctypes
+    hwnd = ctypes.windll.kernel32.GetConsoleWindow()
+    if hwnd:
+        ctypes.windll.user32.ShowWindow(hwnd, 0)
 
+try:
+    # Redirect stdout/stderr to log file on Windows GUI to prevent PyInstaller crashes
+    if sys.platform == "win32" and getattr(sys, "frozen", False):
+        app_data_dir = os.path.join(os.environ.get("LOCALAPPDATA", os.path.expanduser("~")), "SFlow")
+        os.makedirs(app_data_dir, exist_ok=True)
+        # Use buffering=1 (line buffered)
+        f = open(os.path.join(app_data_dir, "sflow_output.log"), "w", buffering=1, encoding="utf-8")
+        sys.stdout = f
+        sys.stderr = f
+except Exception:
+    pass
 
-def _ensure_accessibility() -> bool:
-    """Prompt macOS to grant Accessibility if not trusted. Returns True if already trusted."""
+try:
+    import signal
+    import subprocess
+    import threading
+    from PyQt6.QtWidgets import (
+        QApplication, QSystemTrayIcon, QMenu,
+        QDialog, QVBoxLayout, QLabel, QLineEdit, QPushButton, QMessageBox,
+    )
+    from PyQt6.QtCore import Qt, QObject, pyqtSignal, pyqtSlot
+    from PyQt6.QtGui import QIcon, QPixmap, QAction
+
+    from ui.pill_widget import PillWidget
+    from core.recorder import AudioRecorder
+    from core.transcriber import Transcriber
+    from core.hotkey import HotkeyListener
+    from core.clipboard import paste_text, save_frontmost_app
+    from db.database import TranscriptionDB
+    from web.server import start_web_server
+    from config import LOGO_PATH, APP_DATA_DIR, GROQ_API_KEY
+
+    from ui.settings_dialog import SettingsDialog
+    from core.refiner import TextRefiner
+    import winreg
+except Exception as e:
     try:
-        from ApplicationServices import AXIsProcessTrustedWithOptions
-        return AXIsProcessTrustedWithOptions({"AXTrustedCheckOptionPrompt": True})
+        app_data_dir = os.path.join(os.environ.get("LOCALAPPDATA", os.path.expanduser("~")), "SFlow")
+        os.makedirs(app_data_dir, exist_ok=True)
+        with open(os.path.join(app_data_dir, "crash_log.txt"), "w") as f:
+            f.write("Import Crash occurred:\n")
+            f.write(str(e) + "\n")
+            traceback.print_exc(file=f)
     except Exception:
+        pass
+    sys.exit(1)
+
+def _is_launch_at_login() -> bool:
+    try:
+        key = winreg.OpenKey(winreg.HKEY_CURRENT_USER, r"Software\Microsoft\Windows\CurrentVersion\Run", 0, winreg.KEY_READ)
+        value, _ = winreg.QueryValueEx(key, "SFlow")
+        winreg.CloseKey(key)
         return True
-
-
-# LaunchAgent constants
-_LAUNCH_AGENT_LABEL = "so.saasfactory.sflow"
-_PLIST_PATH = os.path.expanduser(f"~/Library/LaunchAgents/{_LAUNCH_AGENT_LABEL}.plist")
+    except WindowsError:
+        return False
 
 
 # ---------------------------------------------------------------------------
@@ -85,42 +117,23 @@ class FirstRunDialog(QDialog):
 # ---------------------------------------------------------------------------
 # Launch at Login
 # ---------------------------------------------------------------------------
-def _is_launch_at_login() -> bool:
-    return os.path.exists(_PLIST_PATH)
-
-
 def _set_launch_at_login(enabled: bool):
-    if enabled:
-        if getattr(sys, "frozen", False):
-            # In .app bundle: executable is Contents/MacOS/SFlow
-            exe = sys.executable
+    try:
+        key = winreg.OpenKey(winreg.HKEY_CURRENT_USER, r"Software\Microsoft\Windows\CurrentVersion\Run", 0, winreg.KEY_SET_VALUE)
+        if enabled:
+            if getattr(sys, "frozen", False):
+                exe = sys.executable
+            else:
+                exe = os.path.abspath(sys.argv[0])
+            winreg.SetValueEx(key, "SFlow", 0, winreg.REG_SZ, f'"{exe}"')
         else:
-            exe = os.path.abspath(sys.argv[0])
-
-        plist = f"""<?xml version="1.0" encoding="UTF-8"?>
-<!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
-<plist version="1.0">
-<dict>
-    <key>Label</key>
-    <string>{_LAUNCH_AGENT_LABEL}</string>
-    <key>ProgramArguments</key>
-    <array>
-        <string>{exe}</string>
-    </array>
-    <key>RunAtLoad</key>
-    <true/>
-    <key>KeepAlive</key>
-    <false/>
-</dict>
-</plist>"""
-        os.makedirs(os.path.dirname(_PLIST_PATH), exist_ok=True)
-        with open(_PLIST_PATH, "w") as f:
-            f.write(plist)
-        subprocess.run(["launchctl", "load", _PLIST_PATH], capture_output=True)
-    else:
-        if os.path.exists(_PLIST_PATH):
-            subprocess.run(["launchctl", "unload", _PLIST_PATH], capture_output=True)
-            os.remove(_PLIST_PATH)
+            try:
+                winreg.DeleteValue(key, "SFlow")
+            except WindowsError:
+                pass
+        winreg.CloseKey(key)
+    except WindowsError as e:
+        print(f"Failed to set launch at login: {e}")
 
 
 # ---------------------------------------------------------------------------
@@ -141,6 +154,11 @@ def _setup_tray(app: QApplication, port: int) -> QSystemTrayIcon:
     status = QAction("SFlow - Activo", menu)
     status.setEnabled(False)
     menu.addAction(status)
+    menu.addSeparator()
+
+    settings_action = QAction("Configurar IA...", menu)
+    settings_action.triggered.connect(lambda: SettingsDialog().exec())
+    menu.addAction(settings_action)
     menu.addSeparator()
 
     dashboard = QAction(f"Abrir Dashboard (:{port})", menu)
@@ -178,6 +196,7 @@ class SFlowApp(QObject):
         super().__init__()
         self.recorder = AudioRecorder()
         self.transcriber = Transcriber()
+        self.refiner = TextRefiner()
         self.db = TranscriptionDB()
         self.hotkey = HotkeyListener()
         self.pill = PillWidget()
@@ -224,6 +243,7 @@ class SFlowApp(QObject):
         try:
             text = self.transcriber.transcribe(wav_buffer)
             if text:
+                text = self.refiner.refine(text)
                 self.transcription_done.emit(text, duration)
             else:
                 self.transcription_error.emit("No speech detected")
@@ -259,18 +279,8 @@ def main():
         if dialog.exec() != QDialog.DialogCode.Accepted:
             sys.exit(0)
 
-    # Hide from Dock AFTER first-run dialog — menu bar only
-    try:
-        import AppKit
-        AppKit.NSApp.setActivationPolicy_(AppKit.NSApplicationActivationPolicyAccessory)
-    except Exception:
-        pass  # Non-critical: just means Dock icon stays
-
     # Start web dashboard
     port = start_web_server()
-
-    # Request Accessibility permission (shows macOS prompt if not granted)
-    _ensure_accessibility()
 
     # Start the app
     sflow = SFlowApp()
@@ -283,4 +293,18 @@ def main():
 
 
 if __name__ == "__main__":
-    main()
+    try:
+        main()
+    except Exception as e:
+        import traceback
+        try:
+            import os
+            app_data_dir = os.path.join(os.environ.get("LOCALAPPDATA", os.path.expanduser("~")), "SFlow")
+            os.makedirs(app_data_dir, exist_ok=True)
+            with open(os.path.join(app_data_dir, "crash_log.txt"), "w") as f:
+                f.write(f"Crash occurred:\n")
+                f.write(str(e) + "\n")
+                traceback.print_exc(file=f)
+        except Exception:
+            pass
+        sys.exit(1)

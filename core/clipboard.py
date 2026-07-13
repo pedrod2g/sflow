@@ -1,51 +1,53 @@
-import subprocess
 import time
+import win32gui
+import win32con
+import win32process
+import pyperclip
+from pynput import keyboard
 
-_saved_app: str | None = None
+_saved_hwnd: int | None = None
+_keyboard = keyboard.Controller()
 
 
 def save_frontmost_app():
     """Save the currently focused application before recording starts."""
-    global _saved_app
+    global _saved_hwnd
     try:
-        result = subprocess.run(
-            ["osascript", "-e",
-             'tell application "System Events" to get name of first process whose frontmost is true'],
-            capture_output=True, text=True, timeout=2,
-        )
-        name = result.stdout.strip()
-        if name and name != "SFlow":
-            _saved_app = name
-    except Exception:
-        pass
+        hwnd = win32gui.GetForegroundWindow()
+        if hwnd:
+            _saved_hwnd = hwnd
+    except Exception as e:
+        print(f"Error saving frontmost app: {e}")
 
 
 def paste_text(text: str):
     """Copy text to clipboard and paste into the previously active app."""
-    global _saved_app
-    # Copy to clipboard via NSPasteboard (avoids encoding issues in .app bundles)
+    global _saved_hwnd
+
+    # Copy to clipboard via pyperclip
     try:
-        from AppKit import NSPasteboard, NSPasteboardTypeString
-        pb = NSPasteboard.generalPasteboard()
-        pb.clearContents()
-        pb.setString_forType_(text, NSPasteboardTypeString)
-    except Exception:
-        subprocess.run(["pbcopy"], input=text.encode("utf-8"), check=True)
+        pyperclip.copy(text)
+    except Exception as e:
+        print(f"Error copying to clipboard: {e}")
 
     # Restore focus to the app that was active before recording
-    if _saved_app:
+    if _saved_hwnd:
         try:
-            subprocess.run(
-                ["osascript", "-e", f'tell application "{_saved_app}" to activate'],
-                check=True, timeout=2,
-            )
+            # We try to restore if it's minimized, and switch focus
+            win32gui.ShowWindow(_saved_hwnd, win32con.SW_RESTORE)
+            win32gui.SetForegroundWindow(_saved_hwnd)
             time.sleep(0.12)
-        except Exception:
-            pass
+        except Exception as e:
+            print(f"Error restoring window focus: {e}")
 
-    # Simulate Cmd+V
-    subprocess.run(
-        ["osascript", "-e", 'tell application "System Events" to keystroke "v" using command down'],
-        check=True,
-    )
-    _saved_app = None
+    # Simulate Ctrl+V using pynput
+    try:
+        _keyboard.press(keyboard.Key.ctrl)
+        _keyboard.press('v')
+        time.sleep(0.05)
+        _keyboard.release('v')
+        _keyboard.release(keyboard.Key.ctrl)
+    except Exception as e:
+        print(f"Error simulating paste: {e}")
+
+    _saved_hwnd = None

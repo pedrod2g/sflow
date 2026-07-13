@@ -1,7 +1,6 @@
 import math
-from ctypes import c_void_p
-import AppKit
-import objc
+import ctypes
+import win32con
 from PyQt6.QtWidgets import QWidget, QApplication
 from PyQt6.QtCore import Qt, QTimer
 from PyQt6.QtGui import QPainter, QColor, QPainterPath, QPen, QPixmap
@@ -48,6 +47,8 @@ class PillWidget(QWidget):
         self._show_spinner = False
         self._show_error = False
         self._spinner_angle = 0
+        self._close_hovered = False
+        self.setMouseTracking(True)
 
         self.setWindowFlags(
             Qt.WindowType.FramelessWindowHint
@@ -87,21 +88,16 @@ class PillWidget(QWidget):
             self.move(x, y)
 
     def _setup_native_macos(self):
-        """Configure native macOS window to float above everything without stealing focus."""
-        ns_view = objc.objc_object(c_void_p=c_void_p(self.winId().__int__()))
-        ns_window = ns_view.window()
-        # Float above all normal windows (like Spotlight does)
-        ns_window.setLevel_(AppKit.NSFloatingWindowLevel)
-        # Never steal focus
-        ns_window.setStyleMask_(ns_window.styleMask() | AppKit.NSWindowStyleMaskNonactivatingPanel)
-        # Don't hide when app loses focus
-        ns_window.setHidesOnDeactivate_(False)
-        # Visible on all Spaces/desktops
-        ns_window.setCollectionBehavior_(
-            AppKit.NSWindowCollectionBehaviorCanJoinAllSpaces
-            | AppKit.NSWindowCollectionBehaviorStationary
-            | AppKit.NSWindowCollectionBehaviorFullScreenAuxiliary
-        )
+        """Configure native Windows window to float above everything without stealing focus."""
+        hwnd = int(self.winId())
+        
+        # Get current extended window style
+        ex_style = ctypes.windll.user32.GetWindowLongW(hwnd, win32con.GWL_EXSTYLE)
+        
+        # Add tool window (hides from taskbar/alt-tab), topmost, and no activate (prevent focus stealing)
+        new_ex_style = ex_style | win32con.WS_EX_TOOLWINDOW | win32con.WS_EX_TOPMOST | win32con.WS_EX_NOACTIVATE
+        
+        ctypes.windll.user32.SetWindowLongW(hwnd, win32con.GWL_EXSTYLE, new_ex_style)
 
     def showEvent(self, event):
         """Called when the widget is first shown. Sets up native macOS properties."""
@@ -229,17 +225,59 @@ class PillWidget(QWidget):
             painter.drawLine(icon_cx - 3, icon_cy - 3, icon_cx + 3, icon_cy + 3)
             painter.drawLine(icon_cx - 3, icon_cy + 3, icon_cx + 3, icon_cy - 3)
 
+        if self._state == self.STATE_IDLE:
+            # Draw subtle X button on the right
+            x_cx = w - 16
+            x_cy = h // 2
+            if self._close_hovered:
+                painter.setPen(Qt.PenStyle.NoPen)
+                painter.setBrush(QColor(255, 70, 70, 200))
+                painter.drawEllipse(x_cx - 7, x_cy - 7, 14, 14)
+                painter.setPen(QPen(QColor(255, 255, 255, 255), 1.5))
+            else:
+                painter.setPen(QPen(QColor(255, 255, 255, 30), 1))
+                painter.setBrush(QColor(255, 255, 255, 10))
+                painter.drawEllipse(x_cx - 7, x_cy - 7, 14, 14)
+                painter.setPen(QPen(QColor(255, 255, 255, 120), 1.2))
+            
+            painter.drawLine(x_cx - 3, x_cy - 3, x_cx + 3, x_cy + 3)
+            painter.drawLine(x_cx - 3, x_cy + 3, x_cx + 3, x_cy - 3)
+
         painter.end()
 
     def mousePressEvent(self, event):
         if event.button() == Qt.MouseButton.LeftButton:
+            if self._state == self.STATE_IDLE:
+                pos = event.position()
+                x_cx = self.width() - 16
+                x_cy = self.height() // 2
+                distance_sq = (pos.x() - x_cx)**2 + (pos.y() - x_cy)**2
+                if distance_sq <= 8**2:
+                    QApplication.instance().quit()
+                    return
             self._drag_pos = event.globalPosition().toPoint() - self.frameGeometry().topLeft()
             event.accept()
 
     def mouseMoveEvent(self, event):
+        if self._state == self.STATE_IDLE:
+            pos = event.position()
+            x_cx = self.width() - 16
+            x_cy = self.height() // 2
+            distance_sq = (pos.x() - x_cx)**2 + (pos.y() - x_cy)**2
+            is_hovered = distance_sq <= 8**2
+            if is_hovered != self._close_hovered:
+                self._close_hovered = is_hovered
+                self.update()
+
         if event.buttons() == Qt.MouseButton.LeftButton and self._drag_pos:
             self.move(event.globalPosition().toPoint() - self._drag_pos)
             event.accept()
 
     def mouseReleaseEvent(self, event):
         self._drag_pos = None
+
+    def leaveEvent(self, event):
+        if self._close_hovered:
+            self._close_hovered = False
+            self.update()
+        super().leaveEvent(event)

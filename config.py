@@ -11,9 +11,9 @@ def _get_resource_dir() -> str:
 
 
 def _get_data_dir() -> str:
-    """Writable user data (DB, .env). In bundle → ~/Library/Application Support/SFlow/."""
+    """Writable user data (DB, .env). In bundle → %LOCALAPPDATA%/SFlow/."""
     if getattr(sys, "frozen", False):
-        return os.path.expanduser("~/Library/Application Support/SFlow")
+        return os.path.join(os.environ.get("LOCALAPPDATA", os.path.expanduser("~")), "SFlow")
     return os.path.dirname(os.path.abspath(__file__))
 
 
@@ -39,7 +39,7 @@ AUDIO_DTYPE = "int16"
 BLOCK_SIZE = 1024
 
 # UI
-PILL_WIDTH_IDLE = 34
+PILL_WIDTH_IDLE = 58
 PILL_WIDTH_RECORDING = 100
 PILL_WIDTH_STATUS = 52
 PILL_HEIGHT = 34

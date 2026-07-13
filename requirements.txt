@@ -5,4 +5,5 @@ pynput>=1.7.6
 groq>=0.4.0
 python-dotenv>=1.0.0
 flask>=3.0.0
-pyobjc-framework-Cocoa>=10.0
+pywin32>=306
+pyperclip>=1.8.2
