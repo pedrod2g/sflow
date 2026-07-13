@@ -201,14 +201,7 @@ def _set_launch_at_login(enabled: bool):
                     os.remove(_PLIST_PATH)
             except Exception as e:
                 print(f"Failed to remove plist: {e}")
-        else:
-            try:
-                winreg.DeleteValue(key, "SFlow")
-            except WindowsError:
-                pass
-        winreg.CloseKey(key)
-    except WindowsError as e:
-        print(f"Failed to set launch at login: {e}")
+
 
 
 def _setup_tray(app: QApplication, port: int, open_hub) -> QSystemTrayIcon:
